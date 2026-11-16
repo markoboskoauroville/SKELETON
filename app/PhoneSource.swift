@@ -24,6 +24,12 @@ final class PhoneSource: FrameSource {
     static let package = "com.mantraproductions.manualcamera"
     static let activity = "com.mantraproductions.manualcamera/com.mantraproductions.ndi.MainActivity"
     static let minVersion = 221
+    /// What the camera choice is remembered as.
+    static let savedID = "manualcamera.phone"
+    /// --camera pixel / phone / "manual camera"
+    static func matches(_ name: String) -> Bool {
+        let n = name.lowercased(); return n.contains("pixel") || n.contains("phone") || n.contains("manual camera") || n == savedID
+    }
 
     /// The run's choices (UserDefaults phone.lens / phone.width / phone.fps / phone.mbps / phone.codec; defaults below).
     struct Options {
@@ -62,6 +68,8 @@ final class PhoneSource: FrameSource {
     var onPixelBuffer: ((CVPixelBuffer, Double) -> Void)?
     /// Called on the main queue whenever the status line changes (connecting, numbers, errors).
     var onStatusText: ((String) -> Void)?
+    /// Called on the main queue when it could not start (the reason, for a toast).
+    var onError: ((String) -> Void)?
     private(set) var statusText = "" { didSet { let t = statusText; DispatchQueue.main.async { self.onStatusText?(t) } } }
 
     var formatText: String {
@@ -105,7 +113,11 @@ final class PhoneSource: FrameSource {
         DispatchQueue.main.async { c(ok) }
     }
 
-    private func fail(_ why: String) { statusText = why; NSLog("[Skeleton] phone: %@", why); finishStart(false) }
+    private func fail(_ why: String) {
+        statusText = why; NSLog("[Skeleton] phone: %@", why)
+        DispatchQueue.main.async { self.onError?(why) }
+        finishStart(false)
+    }
 
     private func bringUp() {
         guard PhoneAdb.present else { return fail("NO ADB at \(PhoneAdb.path)") }

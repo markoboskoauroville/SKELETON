@@ -45,7 +45,8 @@ final class Slot {
     var lastDetect = 0.0
     var sig: [(t: Double, lum: Double, motion: Double)] = []
     var sizeWarned = false
-    var uid: String { device?.uniqueID ?? "" }
+    var phone: PhoneSource?              // "Manual Camera (Pixel, USB)" (PhoneSource.swift) instead of an AVCapture device
+    var uid: String { device?.uniqueID ?? phone?.uniqueID ?? "" }
 }
 
 enum CalStep: Equatable { case idle, intrinsics(Int), pair(Int), measure }
@@ -173,6 +174,7 @@ final class MainView: NSView, NSMenuDelegate {
             guard let self = self else { return }
             self.stage.mirror = on
             if let d = self.device { self.defaults.set(on, forKey: "mirror." + d.uniqueID) }
+            else if self.slots.first?.phone != nil { self.defaults.set(on, forKey: "mirror.phone") }
         }
         anglesSw = SwitchRow("SHOW ANGLES", on: defaults.bool(forKey: "angles")); anglesSw.onChange = { [weak self] on in
             self?.stage.showAngles = on; self?.defaults.set(on, forKey: "angles") }
@@ -456,10 +458,21 @@ final class MainView: NSView, NSMenuDelegate {
         for p in [cameraPopup, camBPopup, camCPopup] {
             p.removeAllItems()
             for d in devices { p.addItem(withTitle: d.localizedName) }
+            if PhoneSource.adbPresent { p.addItem(withTitle: PhoneSource.displayName) }   // index devices.count
         }
-        if devices.isEmpty { cameraPopup.addItem(withTitle: "NO CAMERA"); stage.cameraName = ""; return }
+        if devices.isEmpty && !PhoneSource.adbPresent { cameraPopup.addItem(withTitle: "NO CAMERA"); stage.cameraName = ""; return }
         var taken: [String] = []
         for k in 0..<slots.count {
+            let popup = [cameraPopup, camBPopup, camCPopup][k]
+            // the phone: asked for by name (--camera pixel), kept while it runs, or remembered
+            let asked = k < pendingCams.count && !pendingCams[k].isEmpty ? pendingCams[k] : (k == 0 ? pendingCamera : nil)
+            let phoneAsked = asked.map { PhoneSource.matches($0) } ?? false
+            let phoneSaved = asked == nil && defaults.string(forKey: k == 0 ? "camera" : "camera\(k)") == PhoneSource.savedID
+            if PhoneSource.adbPresent && (phoneAsked || (slots[k].phone != nil && asked == nil) || (phoneSaved && slots[k].device == nil)) {
+                popup.selectItem(at: devices.count)
+                if slots[k].phone == nil { selectPhone(slot: k) }
+                continue
+            }
             var pick: AVCaptureDevice?
             if k < pendingCams.count, !pendingCams[k].isEmpty {
                 let name = pendingCams[k].lowercased()
@@ -472,7 +485,6 @@ final class MainView: NSView, NSMenuDelegate {
             if pick == nil { pick = devices.first { !taken.contains($0.uniqueID) } }
             guard let p = pick else { continue }
             taken.append(p.uniqueID)
-            let popup = [cameraPopup, camBPopup, camCPopup][k]
             if let i = devices.firstIndex(where: { $0.uniqueID == p.uniqueID }) { popup.selectItem(at: i) }
             let changed = slots[k].device?.uniqueID != p.uniqueID
             if changed || (k == 0 && pendingCamera != nil) { select(p, slot: k) }
@@ -486,7 +498,9 @@ final class MainView: NSView, NSMenuDelegate {
 
     func chooseCamera(_ k: Int, _ popup: NSPopUpButton) {
         let i = popup.indexOfSelectedItem
-        guard i >= 0, i < devices.count, k < slots.count else { return }
+        guard k < slots.count else { return }
+        if i == devices.count && PhoneSource.adbPresent { selectPhone(slot: k); return }
+        guard i >= 0, i < devices.count else { return }
         select(devices[i], slot: k)
     }
 
@@ -500,6 +514,7 @@ final class MainView: NSView, NSMenuDelegate {
     func select(_ d: AVCaptureDevice, slot k: Int) {
         let s = slots[k]
         s.device = d
+        s.phone = nil          // a running phone stream is stopped by attach (Pipeline.detach -> stop)
         defaults.set(d.uniqueID, forKey: k == 0 ? "camera" : "camera\(k)")
         let m = defaults.object(forKey: "mirror." + d.uniqueID) as? Bool ?? d.localizedName.contains("FaceTime")
         s.stage.mirror = m
@@ -514,6 +529,36 @@ final class MainView: NSView, NSMenuDelegate {
             guard let self = self, let s = s else { return }
             s.formatText = src.formatText
             if !ok { s.stage.toast("THE CAMERA DID NOT START") }
+            self.refreshSettings()
+        }
+    }
+
+    /// "Manual Camera (Pixel, USB)": PhoneSource starts the camera on the Pixel over adb and streams it over the cable.
+    func selectPhone(slot k: Int) {
+        let s = slots[k]
+        let src = PhoneSource()
+        s.device = nil
+        s.phone = src
+        defaults.set(PhoneSource.savedID, forKey: k == 0 ? "camera" : "camera\(k)")
+        let m = defaults.object(forKey: "mirror.phone") as? Bool ?? false
+        s.stage.mirror = m
+        if k == 0 { mirrorSw.isOn = m }
+        s.stage.cameraName = PhoneSource.displayName
+        s.size = .zero; s.hist = []; s.sizeWarned = false
+        s.formatText = "starting the Pixel..."
+        s.pipe.attach(src)
+        src.onError = { [weak s] t in s?.stage.toast(t) }
+        src.onStatusText = { [weak self, weak s, weak src] t in
+            guard let self = self, let s = s, let src = src, s.phone === src else { return }
+            s.formatText = t
+            // the phone's own lens model until the board calibration exists
+            if s.intr == nil, let i = src.intrinsics { s.intr = i }
+            if self.settingsPopover.isShown { self.refreshSettings() }
+        }
+        src.start { [weak self, weak s, weak src] ok in
+            guard let self = self, let s = s, let src = src, s.phone === src else { return }
+            if ok { self.loadCalibration(s); if s.intr == nil { s.intr = src.intrinsics } }
+            s.formatText = ok ? src.formatText : src.statusText
             self.refreshSettings()
         }
     }

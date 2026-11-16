@@ -166,7 +166,7 @@ extension MainView {
 
     @objc func calibratePressed() {
         guard slots.count > 1 else { stage.toast("CHOOSE 2 OR 3 CAMERAS FIRST"); return }
-        guard slots.allSatisfy({ $0.device != nil }) else { return }
+        guard slots.allSatisfy({ $0.device != nil || $0.phone != nil }) else { return }
         if calibrated {
             for s in slots { s.intr = nil; s.extr = nil }
         }
