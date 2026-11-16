@@ -1,11 +1,14 @@
-// PhoneSource.swift: "Manual Camera (Pixel, USB)", the Pixel 7 running Mantra Manual Camera v221+ as a FrameSource.
+// PhoneSource.swift: "Manual Camera (<phone>, USB|Wi-Fi)": every phone running Mantra Manual Camera v221+ (the Pixel 7,
+// the Nothing A142, ...) as its own FrameSource, several at once (Marko, 16.11.2026: "four cameras connected at the same time").
 //
 // Marko, 16.11.2026: "if I connect via USB my Pixel phone, this app needs to understand how to adjust the phone and the
 // camera to get the best possible picture available on this USB connection ... start the camera itself, adjust the
 // settings of this phone and being able to use it for posing."
 //
-// How: adb finds the phone (USB first), `adb forward` puts the camera's Mantra Link (48100) and its status (48102) on
-// 127.0.0.1:48110 / :48112, `am start ... --es mode skeleton` starts the camera with our choices (lens, size, fps,
+// How: a background scan lists the phones on adb (one entry per hardware serial; USB wins over adb-over-Wi-Fi). On the cable,
+// `adb forward tcp:0` puts the camera's Mantra Link (48100) and its status (48102) on free local ports; without one, the
+// stream goes straight to the phone's address (its LAN or Tailscale address, whichever answers faster) at a lower bit rate
+// (12 Mbit/s: the Pixel's 2.4 GHz Wi-Fi did not carry 40). `am start ... --es mode skeleton` starts the camera with our choices (lens, size, fps,
 // bit rate, keyframe every second, 50 Hz anti-banding, stabilisation off, exposure and white balance locked after 3 s),
 // MODE 2 asks for the camera's own hardware stream (HEVC or H.264, untouched), VideoToolbox decodes it to BGRA.
 // The wire is MANTRA_NDI shared/kotlin/.../Link.kt (type byte, big-endian length, payload; SCONFIG 4, SFRAME 5).

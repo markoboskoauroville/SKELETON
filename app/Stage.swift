@@ -140,7 +140,7 @@ final class StageView: NSView {
         drawCalib(rect, ctx)
         drawInfo(area, rect)
         if !isSecondary { drawRing(area); drawBand() }
-        if let w = wizard { text(w, at: CGPoint(x: area.midX, y: area.maxY - 100), size: 13, color: .white, center: true, back: true) }
+        if let w = wizard { wrappedText(w, centerX: area.midX, midY: area.midY, size: 13, color: .white) }
         var qy = area.maxY - infoHeight() - 22
         for (label, v) in [("TRACKING QUALITY", quality), ("THIS CAMERA", viewQuality)] {
             guard let q = v else { continue }
@@ -152,7 +152,7 @@ final class StageView: NSView {
             text("● REC  " + r, at: CGPoint(x: area.midX, y: area.maxY - 60), size: 16, color: StageView.red, center: true, back: true)
         }
         if let t = toastText, Date() < toastUntil {
-            text(t, at: CGPoint(x: area.midX, y: area.minY + 150), size: 14, color: .white, center: true, back: true)
+            wrappedText(t, centerX: area.midX, midY: area.minY + 190, size: 14, color: .white)
         }
         if people.isEmpty {
             text("NO PERSON SEEN", at: CGPoint(x: area.midX, y: area.maxY - 60), size: 12, color: .white.withAlphaComponent(0.7), center: true, back: true)
@@ -290,6 +290,18 @@ final class StageView: NSView {
         let ps = NSMutableParagraphStyle(); ps.lineBreakMode = .byWordWrapping
         let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 14), .foregroundColor: NSColor.white, .paragraphStyle: ps]
         (b.text as NSString).draw(in: CGRect(x: 16, y: r.minY + 30, width: r.width - 32, height: r.height - 34), withAttributes: attrs)
+    }
+
+    /// Text that wraps inside the pane (never cut), on a dark plate.
+    func wrappedText(_ s: String, centerX: CGFloat, midY: CGFloat, size: CGFloat, color: NSColor) {
+        let w = max(80, bounds.width - 40)
+        let ps = NSMutableParagraphStyle(); ps.alignment = .center; ps.lineBreakMode = .byWordWrapping
+        let a: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: size, weight: .bold), .foregroundColor: color, .paragraphStyle: ps]
+        let r = (s as NSString).boundingRect(with: CGSize(width: w, height: 400), options: [.usesLineFragmentOrigin], attributes: a)
+        let box = CGRect(x: centerX - r.width / 2 - 8, y: midY - r.height / 2 - 6, width: r.width + 16, height: r.height + 12)
+        NSColor.black.withAlphaComponent(0.6).setFill()
+        NSBezierPath(roundedRect: box, xRadius: 6, yRadius: 6).fill()
+        (s as NSString).draw(in: CGRect(x: box.minX + 8, y: box.minY + 6, width: r.width, height: r.height), withAttributes: a)
     }
 
     func text(_ s: String, at p: CGPoint, size: CGFloat, color: NSColor, center: Bool, back: Bool = false) {
