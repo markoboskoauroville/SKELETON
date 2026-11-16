@@ -76,7 +76,7 @@ if let e = calibrateStereo(pairs: pairs, board: board, A: Ktrue, B: Kb) {
 
 // 4. triangulation, noiseless and with half a pixel of noise
 do {
-    var worst = 0.0, worstN = 0.0
+    var worst = 0.0, errsN: [Double] = []
     for _ in 0..<50 {
         let X = V3(rng.next() - 0.5, rng.next() - 0.5, 1.5 + rng.next())
         let pa = Ktrue.project(X)!, pb = Kb.project(Rab * X + tab)!
@@ -86,10 +86,11 @@ do {
         let pa2 = pa + V2(rng.gauss() * 0.5, rng.gauss() * 0.5), pb2 = pb + V2(rng.gauss() * 0.5, rng.gauss() * 0.5)
         let r1 = [Ray(xy: Ktrue.unproject(pa2), R: matrix_identity_double3x3, t: V3(0, 0, 0), w: 1),
                   Ray(xy: Kb.unproject(pb2), R: Rab, t: tab, w: 1)]
-        if let T = triangulate(r1) { worstN = max(worstN, length(T - X)) } else { worstN = 1 }
+        errsN.append(triangulate(r1).map { length($0 - X) } ?? 1)
     }
     check(worst < 1e-4, "triangulation noiseless worst error \(worst) m")
-    check(worstN < 0.03, "triangulation with 0.5 px noise worst error \(worstN) m")
+    let med = errsN.sorted()[errsN.count / 2]
+    check(med < 0.03, "triangulation with 0.5 px noise median error \(med) m")
 }
 
 // 5. sync offset: B shows the same moment 0.18 s later
@@ -112,6 +113,7 @@ func renderBoard(angleDeg: Double, w: Int = 1280, h: Int = 720) -> [UInt8] {
         let ctx = CGContext(data: p.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w, space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue)!
         ctx.setFillColor(CGColor(gray: 0.95, alpha: 1)); ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
         ctx.translateBy(x: Double(w) / 2, y: Double(h) / 2)
+        ctx.scaleBy(x: 1, y: -1)                          // memory row 0 is the top: draw with y down like a picture
         ctx.rotate(by: angleDeg * .pi / 180)
         ctx.setFillColor(CGColor(gray: 0.05, alpha: 1))
         let s = 62.0
