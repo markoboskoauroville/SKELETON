@@ -19,3 +19,7 @@
 
 **16.11.2026:** "Now I have four cameras connected at the same time. There is FaceTime, there is Sony, there is Pixel and there is Nothing. Some are on wires, some are not on wire. Please wire them in my skeleton, everything."
 (Plan: every phone with Manual Camera v221+ is its own source, "Manual Camera (<phone>, USB|Wi-Fi)": USB through adb forward when on a cable, else the stream straight over Wi-Fi/Tailscale (the faster address measured), each with host-clock times for the multi-camera sync.)
+
+**16.11.2026:** "For some reason I am upside down in manual camera nothing over USB. So you need to detect upside down picture and simply rotate them."
+
+**16.11.2026:** "This is my personal application. So it can work with my personal phones. If ADB is there and camera not working, it needs to kick it in automatically. In the settings we can disable automatic kicks in of the cameras through ADB. By default it's enabled. and when I start the app it just scans Wi-Fi, USB, ADB and just automatically configures the phones to be able to record and find the Sony so pictures is coming through these devices I have for now three"

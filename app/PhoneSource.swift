@@ -53,9 +53,44 @@ final class PhoneSource: FrameSource {
         t.resume(); scanTimer = t
     }
 
+    /// Marko, 16.11.2026: "If ADB is there and camera not working, it needs to kick it in automatically. In the settings we
+    /// can disable automatic kicks ... By default it's enabled." The switch AUTO START PHONE CAMERAS (ADB) writes this.
+    /// Off: no adb connect, no camera started or restarted by itself; a phone starts only when chosen (CONNECT).
+    static var autoStart: Bool {
+        get { UserDefaults.standard.object(forKey: "phone.autostart") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "phone.autostart") }
+    }
+
+    /// Marko's phones' wireless adb addresses (the Pixel on Tailscale, the Nothing), and every one seen since.
+    static var knownAdbAddresses: [String] {
+        get { UserDefaults.standard.stringArray(forKey: "phone.adbAddresses") ?? ["100.70.23.53:5555", "10.239.153.128:5555"] }
+        set { UserDefaults.standard.set(Array(Set(newValue)).sorted(), forKey: "phone.adbAddresses") }
+    }
+    private static var lastAutoConnect = 0.0
+
+    /// adb connect to the known wireless addresses and to the phones announced by mDNS (wireless debugging), at most every
+    /// 20 s. Never touches the phones' networks or tethering.
+    private static func autoConnect() {
+        let now = Date().timeIntervalSince1970
+        guard autoStart, now - lastAutoConnect > 20 else { return }
+        lastAutoConnect = now
+        let listed = Set(PhoneAdb.devices().map { $0.serial })
+        var targets = knownAdbAddresses
+        for line in PhoneAdb.run(["mdns", "services"], timeout: 5).split(separator: "\n") where line.contains("_adb-tls-connect") {
+            if let hp = line.split(separator: "\t").last.map({ String($0).trimmingCharacters(in: .whitespaces) }), hp.contains(":") { targets.append(hp) }
+        }
+        for t in Set(targets) where !listed.contains(t) {
+            let out = PhoneAdb.run(["connect", t], timeout: 4)
+            if out.contains("connected") && !out.contains("cannot") { PhoneLog.line("adb connect \(t): \(out.trimmingCharacters(in: .whitespacesAndNewlines))") }
+        }
+    }
+
     private static func scanOnce() {
         if scanning { return }; scanning = true; defer { scanning = false }
+        autoConnect()
         let found = PhoneAdb.phones()
+        let wifi = found.compactMap { $0.wifiSerial }
+        if !wifi.isEmpty && !Set(wifi).isSubset(of: Set(knownAdbAddresses)) { knownAdbAddresses = knownAdbAddresses + wifi }
         DispatchQueue.main.async {
             let first = !scannedOnce
             scannedOnce = true
@@ -115,7 +150,7 @@ final class PhoneSource: FrameSource {
         var s = w > 0 ? "\(w)x\(h)" : "\(options.width) px"
         s += String(format: " %.1f fps %.0f Mbit/s %@", decodedFps, mb, codec)
         if latencyMs > 0 { s += String(format: " · %.0f ms", latencyMs) }
-        s += " · " + (overUSB ? "USB" + (usbSpeed.isEmpty ? "" : " " + usbSpeed) : "Wi-Fi " + host)
+        s += " · " + (overUSB ? "USB" + (usbSpeed.isEmpty ? "" : " " + usbSpeed) : route + " " + host)
         return s
     }
 
@@ -132,6 +167,10 @@ final class PhoneSource: FrameSource {
     private var syncSamples: [(rtt: Double, off: Double)] = []
     private var lats: [Double] = []
     private var frameTimes: [Double] = []
+
+    /// Chosen by Marko's hand (CONNECT, the camera list): it may start the camera even with AUTO START off.
+    var userAsked = false
+    private var mayKick: Bool { PhoneSource.autoStart || userAsked }
 
     init(phone: PhoneEntry, options: Options = .load()) { self.phone = phone; self.options = options }
 
@@ -157,58 +196,23 @@ final class PhoneSource: FrameSource {
     private func bringUp() {
         guard PhoneAdb.present else { return fail("NO ADB at \(PhoneAdb.path)") }
         let who = phone.short.uppercased()
-        // the cable when there is one; else the phone straight over the network, at its faster address
-        if let u = phone.usbSerial {
-            serial = u; overUSB = true; host = "127.0.0.1"
-            guard let lp = PhoneAdb.forward(u, remote: 48100), let sp = PhoneAdb.forward(u, remote: 48102) else {
-                return fail("\(who): ADB FORWARD FAILED") }
-            linkPort = lp; statusPort = sp
-            usbSpeed = PhoneAdb.macUsbSpeed(model: phone.model)
-        } else if let w = phone.wifiSerial {
-            serial = w; overUSB = false; linkPort = 48100; statusPort = 48102
-        } else { return fail("\(who): NOT ON ADB") }
-        let v = PhoneAdb.cameraVersion(serial)
-        guard v >= Self.minVersion else { return fail("\(who): MANUAL CAMERA v\(v) — v\(Self.minVersion) OR NEWER NEEDED (UPDATE IT)") }
-        PhoneAdb.shell(serial, "input keyevent KEYCODE_WAKEUP")
-        statusText = "STARTING MANUAL CAMERA ON THE \(who)..."
-        let o = options
-        PhoneAdb.run(["-s", serial, "shell", "am", "start", "-n", Self.activity, "--es", "mode", "skeleton", "--es", "lens", o.lens,
-                      "--ei", "width", "\(o.width)", "--ei", "fps", "\(o.fps)", "--ei", "mbps", "\(overUSB ? o.mbps : o.mbpsWifi)",
-                      "--es", "codec", o.codec, "--ei", "gop", "1", "--es", "lock", "ae,awb", "--es", "flicker", "50",
-                      "--es", "stab", "off", "--ez", "dim", "true"])
-        if !overUSB {
-            // Wi-Fi: the phone's LAN address and its adb address (Tailscale), the one whose status answers fastest
-            var cands: [String] = []
-            if let lan = PhoneAdb.wifiAddress(serial) { cands.append(lan) }
-            let adbHost = String(serial.split(separator: ":").first ?? "")
-            if !adbHost.isEmpty && !cands.contains(adbHost) { cands.append(adbHost) }
-            let deadline = Date().addingTimeInterval(12)
-            var best: (String, Double)?
-            while best == nil && Date() < deadline && !stopped {
-                for c in cands { if let r = Self.statusRtt(c) { if best == nil || r < best!.1 { best = (c, r) } } }
-                if best == nil { Thread.sleep(forTimeInterval: 0.5) }
-            }
-            guard let b = best else { return fail("\(who): NOT REACHABLE OVER THE NETWORK (\(cands.joined(separator: ", ")))") }
-            host = b.0
-            NSLog("[Skeleton] phone %@: Wi-Fi via %@ (%.0f ms; tried %@)", phone.label, host, b.1 * 1000, cands.joined(separator: ", "))
+        if let adbSerial = phone.usbSerial ?? phone.wifiSerial {
+            let v = PhoneAdb.cameraVersion(adbSerial)
+            guard v >= Self.minVersion else { return fail("\(who): MANUAL CAMERA v\(v) — v\(Self.minVersion) OR NEWER NEEDED (UPDATE IT)") }
         }
-        // the camera answers its status in skeleton mode
-        let deadline = Date().addingTimeInterval(12)
-        var ready = false
-        while Date() < deadline && !stopped {
-            if let s = fetchStatus(), (s["mode"] as? String) == "skeleton" { ready = true; break }
-            Thread.sleep(forTimeInterval: 0.4)
+        statusText = "STARTING MANUAL CAMERA ON THE \(who)..."
+        // tried again and again (5 s, 10 s ... 30 s) until it comes: the phone may be locked, asleep, or off adb a moment
+        var wait = 5.0
+        while !stopped {
+            guard let err = connectRoute() else { break }
+            statusText = "\(who): " + err
+            DispatchQueue.main.async { self.onError?("\(who): " + err) }
+            PhoneLog.line("\(phone.label): start failed: \(err); again in \(Int(wait)) s")
+            Thread.sleep(forTimeInterval: wait); wait = min(30, wait * 2)
         }
         guard !stopped else { return }
-        guard ready else { return fail("\(phone.short.uppercased()): THE CAMERA DID NOT ANSWER (phone unlocked? Manual Camera allowed the camera?)") }
-        statusText = "CONNECTING TO THE CAMERA'S STREAM..."
         decoder.onImage = { [weak self] pb, ptsUs in self?.decoded(pb, ptsUs) }
-        let l = PhoneLink(host: host, port: linkPort)
-        l.onConfig = { [weak self] c in self?.decoder.configure(c) }
-        l.onFrame = { [weak self] au, _, pts in self?.decoder.decode(au, pts: pts) }
-        l.onStatus = { [weak self] s in if s != "connected" { self?.statusText = "LINK: " + s } }
-        link = l
-        l.connect()
+        openLink()
         let t = DispatchSource.makeTimerSource(queue: q)
         t.schedule(deadline: .now() + 0.5, repeating: 1.0)
         t.setEventHandler { [weak self] in self?.tick() }
@@ -216,9 +220,149 @@ final class PhoneSource: FrameSource {
         statusTimer = t
         q.asyncAfter(deadline: .now() + 12) { [weak self] in
             guard let self = self, self.startCompletion != nil else { return }
-            self.fail("\(self.phone.short.uppercased()): NO PICTURE IN 12 S" + (self.overUSB ? "" : " (over Wi-Fi: plug the USB cable)"))
+            self.fail("\(self.phone.short.uppercased()): NO PICTURE IN 12 S" + (self.overUSB ? "" : " (over the network: plug the USB cable)"))
         }
     }
+
+    /// How the stream reaches the Mac now: "USB" (adb forward), "USB network" (tethering), "Wi-Fi", "Tailscale".
+    private(set) var route = ""
+    /// The phone's addresses seen so far (address, interface): a stream can go on over them while adb itself is gone
+    /// (the Nothing's USB re-enumerates when tethering is switched; wireless adb drops with the Wi-Fi).
+    private var knownAddrs: [(ip: String, iface: String)] = []
+    private var lastFrameAt = 0.0
+    private var recovering = false
+
+    private func openLink() {
+        link?.disconnect()
+        let l = PhoneLink(host: host, port: linkPort)
+        l.onConfig = { [weak self] c in self?.decoder.configure(c) }
+        l.onFrame = { [weak self] au, _, pts in self?.decoder.decode(au, pts: pts) }
+        l.onStatus = { [weak self] s in if s != "connected" { NSLog("[Skeleton] phone link: %@", s) } }
+        link = l
+        l.connect()
+    }
+
+    /// Chooses the way to the phone and makes sure its camera is in SKELETON mode at the right bit rate. nil = done,
+    /// else why not. Used at the start and by the watchdog after a drop.
+    private func connectRoute() -> String? {
+        let fresh = PhoneAdb.phones().first { $0.hwSerial == phone.hwSerial }
+        let adbSerial = fresh?.usbSerial ?? fresh?.wifiSerial
+        if let a = adbSerial {
+            for x in PhoneAdb.addresses(a) where !knownAddrs.contains(where: { $0.ip == x.ip }) { knownAddrs.append(x) }
+            if let w = fresh?.wifiSerial, let h = w.split(separator: ":").first, !knownAddrs.contains(where: { $0.ip == String(h) }) {
+                knownAddrs.append((String(h), "adb"))
+            }
+        }
+        syncSamples = []; clockOffset = nil
+        if let u = fresh?.usbSerial, let lp = PhoneAdb.forward(u, remote: 48100), let sp = PhoneAdb.forward(u, remote: 48102) {
+            serial = u; overUSB = true; host = "127.0.0.1"; linkPort = lp; statusPort = sp; route = "USB"
+            if usbSpeed.isEmpty { usbSpeed = PhoneAdb.macUsbSpeed(model: phone.model) }
+        } else {
+            overUSB = false; linkPort = 48100; statusPort = 48102
+            if let a = adbSerial { serial = a }
+            // the camera must answer before its addresses can be measured: started if none answers yet
+            var best = bestAddress()
+            if best == nil, let a = adbSerial {
+                startCamera(a, mbps: options.mbpsWifi)
+                let deadline = Date().addingTimeInterval(12)
+                while best == nil && Date() < deadline && !stopped { Thread.sleep(forTimeInterval: 0.5); best = bestAddress() }
+            }
+            guard let b = best else {
+                return adbSerial == nil ? "NOT ON ADB AND NOT REACHABLE" : "NOT REACHABLE OVER THE NETWORK (\(knownAddrs.map { $0.ip }.joined(separator: ", ")))"
+            }
+            host = b.ip
+            route = b.iface.hasPrefix("wlan") ? "Wi-Fi" : (b.iface.hasPrefix("tun") || b.ip.hasPrefix("100.")) ? "Tailscale"
+                : (b.iface.hasPrefix("rndis") || b.iface.hasPrefix("ncm") || b.iface.hasPrefix("usb")) ? "USB network" : "network"
+            NSLog("[Skeleton] phone %@: %@ via %@ (%@, %.0f ms)", phone.label, route, host, b.iface, b.rtt * 1000)
+        }
+        // SKELETON mode at the bit rate this route carries (the tethered USB network carries what the cable does)
+        let want = overUSB || route == "USB network" ? options.mbps : options.mbpsWifi
+        var st = fetchStatus()
+        let asked = (st?["asked"] as? [String: Any])?["mbps"] as? Int
+        if st?["mode"] as? String != "skeleton" || asked != want {
+            guard let a = adbSerial else { return st == nil ? "THE CAMERA DOES NOT ANSWER" : nil }
+            startCamera(a, mbps: want, forceStop: kicks >= 2)
+            let deadline = Date().addingTimeInterval(12)
+            st = nil
+            while Date() < deadline && !stopped {
+                if let s = fetchStatus(), s["mode"] as? String == "skeleton" { st = s; break }
+                Thread.sleep(forTimeInterval: 0.4)
+            }
+            if st == nil { return !lockedNote.isEmpty ? lockedNote : !mayKick ? "NOT STARTED (AUTO START IS OFF: CONNECT)" : "THE CAMERA DID NOT ANSWER (phone unlocked? Manual Camera allowed the camera?)" }
+        }
+        return nil
+    }
+
+    /// The screen on and unlocked (a lock without a PIN is dismissed; a PIN is never entered: false = "UNLOCK THE PHONE").
+    private func wakeAndCheckUnlocked(_ serial: String) -> Bool {
+        let w = PhoneAdb.shell(serial, "dumpsys power | grep -m1 mWakefulness=")
+        if !w.contains("Awake") { PhoneAdb.shell(serial, "input keyevent KEYCODE_WAKEUP"); Thread.sleep(forTimeInterval: 0.6) }
+        func locked() -> Bool { PhoneAdb.shell(serial, "dumpsys window | grep -m1 isKeyguardShowing").contains("isKeyguardShowing=true") }
+        if !locked() { return true }
+        PhoneAdb.shell(serial, "wm dismiss-keyguard"); Thread.sleep(forTimeInterval: 0.8)
+        return !locked()
+    }
+
+    private var lockedNote = ""
+
+    private func startCamera(_ serial: String, mbps: Int, forceStop: Bool = false) {
+        guard mayKick else { return }
+        if !wakeAndCheckUnlocked(serial) {
+            lockedNote = "UNLOCK THE \(phone.short.uppercased()) (its screen lock is on)"
+            PhoneLog.line("\(phone.label): locked with a PIN: waiting for Marko")
+            return
+        }
+        lockedNote = ""
+        if forceStop { PhoneAdb.shell(serial, "am force-stop \(Self.package)"); Thread.sleep(forTimeInterval: 0.8) }
+        PhoneLog.line("\(phone.label): camera started (skeleton, \(mbps) Mbit/s\(forceStop ? ", after force-stop" : ""))")
+        let o = options
+        PhoneAdb.run(["-s", serial, "shell", "am", "start", "-n", Self.activity, "--es", "mode", "skeleton", "--es", "lens", o.lens,
+                      "--ei", "width", "\(o.width)", "--ei", "fps", "\(o.fps)", "--ei", "mbps", "\(mbps)",
+                      "--es", "codec", o.codec, "--ei", "gop", "1", "--es", "lock", "ae,awb", "--es", "flicker", "50",
+                      "--es", "stab", "off", "--ez", "dim", "true"])
+    }
+
+    /// The phone's address whose status answers fastest (Wi-Fi, the tethered USB network, Tailscale), or nil.
+    private func bestAddress() -> (ip: String, iface: String, rtt: Double)? {
+        var best: (ip: String, iface: String, rtt: Double)?
+        for a in knownAddrs { if let r = Self.statusRtt(a.ip), best == nil || r < best!.rtt { best = (a.ip, a.iface, r) } }
+        return best
+    }
+
+    /// The watchdog: no picture for 3 s = the way to the phone is found again (adb's transport changed, the Wi-Fi dropped,
+    /// tethering switched on or off), the camera started again only if it lost SKELETON mode, and the stream reopened.
+    /// Kicks in a row without a picture since: the 2nd and later force-stop Manual Camera before starting it again.
+    private var kicks = 0
+    private var lastGoodAt = 0.0
+
+    private func recover(_ why: String) {
+        recovering = true
+        defer { recovering = false }
+        let who = phone.short.uppercased()
+        if hostNow() - lastGoodAt > 20 { } else { kicks = 0 }      // a picture flowed lately: start the ladder again
+        var wait = 2.0
+        while !stopped {
+            kicks += 1
+            statusText = "\(who): RECONNECTING" + (kicks > 1 ? " (\(kicks))" : "") + "..."
+            PhoneLog.line("\(phone.label): kick \(kicks) (\(why))\(kicks >= 2 ? ": force-stop and start" : "")")
+            link?.disconnect()
+            // a camera that still says SKELETON but sends nothing is started again from the 2nd kick on
+            if kicks >= 2, let a = PhoneAdb.phones().first(where: { $0.hwSerial == phone.hwSerial }).flatMap({ $0.usbSerial ?? $0.wifiSerial }) {
+                startCamera(a, mbps: overUSB || route == "USB network" ? options.mbps : options.mbpsWifi, forceStop: true)
+            }
+            if connectRoute() == nil, !stopped {
+                openLink()
+                lastFrameAt = hostNow()          // 3 s grace for the first frame
+                PhoneLog.line("\(phone.label): reconnected over \(route) \(host)")
+                return
+            }
+            Thread.sleep(forTimeInterval: wait); wait = min(30, wait * 2)
+        }
+    }
+
+    /// A black picture for 3 s is a missing picture too (a camera taken by another app, a covered lens is rare on a tripod).
+    private var blackSince = 0.0
+    private var lumCheckAt = 0.0
 
     /// One status request to <host>:48102: its round trip in seconds, or nil (not answering in skeleton mode).
     static func statusRtt(_ host: String) -> Double? {
@@ -248,7 +392,11 @@ final class PhoneSource: FrameSource {
         let now = hostNow()
         frameTimes = frameTimes.filter { now - $0 < 2 }
         decodedFps = Double(frameTimes.count) / 2
-        if started { statusText = formatText }
+        if started && !recovering {
+            if now - lastFrameAt > 3 { recover("no picture for 3 s") }
+            else if blackSince > 0 && now - blackSince > 3 { blackSince = 0; recover("black picture for 3 s") }
+            else { statusText = formatText }
+        }
     }
 
     /// GET /status, with the clock exchange: the phone's clock_us against the middle of the round trip.
@@ -278,6 +426,12 @@ final class PhoneSource: FrameSource {
 
     private func decoded(_ pb: CVPixelBuffer, _ ptsUs: Int64) {
         let now = hostNow()
+        lastFrameAt = now
+        if now - lumCheckAt > 0.5 {
+            lumCheckAt = now
+            let lum = meanLuminance(pb)
+            q.async { if lum < 4 { if self.blackSince == 0 { self.blackSince = now } } else { self.blackSince = 0; self.lastGoodAt = now; self.kicks = 0 } }
+        }
         var t = now
         if let off = clockOffset {
             let taken = Double(ptsUs) / 1e6 - off
@@ -556,6 +710,18 @@ enum PhoneAdb {
         UInt16(run(["-s", serial, "forward", "tcp:0", "tcp:\(remote)"]).trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
+    /// The phone's IPv4 addresses a Mac can reach: Wi-Fi, USB tethering (rndis/ncm/usb), Ethernet, Tailscale (tun).
+    /// Mobile data (ccmni, rmnet) and loopback are left out.
+    static func addresses(_ serial: String) -> [(ip: String, iface: String)] {
+        shell(serial, "ip -4 -o addr show").split(separator: "\n").compactMap { line in
+            let f = line.split(separator: " ", omittingEmptySubsequences: true)
+            guard f.count >= 4, let i = f.firstIndex(of: "inet"), i + 1 < f.count else { return nil }
+            let iface = String(f[1]), ip = String(f[i + 1].split(separator: "/")[0])
+            let ok = ["wlan", "rndis", "ncm", "usb", "eth", "tun"].contains { iface.hasPrefix($0) }
+            return ok ? (ip, iface) : nil
+        }
+    }
+
     /// The phone's own Wi-Fi address (wlan0), or nil.
     static func wifiAddress(_ serial: String) -> String? {
         let out = shell(serial, "ip -4 addr show wlan0")
@@ -595,5 +761,21 @@ enum PhoneAdb {
             return nil
         }
         return walk(root["SPUSBDataType"] as? [[String: Any]] ?? []) ?? ""
+    }
+}
+
+/// One line per kick, connect and failure: ~/Library/Logs/Skeleton/phones.log (Marko: "log each kick").
+enum PhoneLog {
+    private static let q = DispatchQueue(label: "skeleton.phone.log")
+    static func line(_ text: String) {
+        NSLog("[Skeleton] %@", text)
+        q.async {
+            let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Skeleton")
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let f = dir.appendingPathComponent("phones.log")
+            let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd HH:mm:ss"
+            let l = Data((df.string(from: Date()) + "  " + text + "\n").utf8)
+            if let h = try? FileHandle(forWritingTo: f) { h.seekToEndOfFile(); h.write(l); try? h.close() } else { try? l.write(to: f) }
+        }
     }
 }
