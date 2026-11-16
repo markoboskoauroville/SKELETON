@@ -41,6 +41,7 @@ def parse_args():
     ap.add_argument("--samples", type=int, default=16)
     ap.add_argument("--frames", type=int, default=0, help="render only the first N frames (tests)")
     ap.add_argument("--blend", default="", help="also save the animated scene as this .blend")
+    ap.add_argument("--no-render", action="store_true", help="only build the animation (with --blend)")
     return ap.parse_args(argv)
 
 
@@ -401,6 +402,10 @@ def main():
 
     if a.blend:
         bpy.ops.wm.save_as_mainfile(filepath=os.path.abspath(os.path.expanduser(a.blend)), copy=True)
+    if a.no_render:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        print("DONE " + (a.blend or "(nothing rendered)"), flush=True)
+        return
 
     count = {"n": 0}
     t_start = time.time()

@@ -340,9 +340,9 @@ def build_mannequin(coll, wood, arm):
         ball("Wrist." + S, wr, 0.027, "hand." + S)
         # mitten hand: flat paddle (thin in Z, palm down in the T-pose) and a thumb toward the front
         d = Vector((sx, 0, 0))
-        hand_prof = [(z, r) for z, r in egg_profile(n=16, top=0.92, bottom=1.0)]
-        part("Hand." + S, lathe(hand_prof), aim_matrix(wr + d * 0.018, wr + d * 0.2, Vector((0, -1, 0))),
-             "hand." + S, scale=(0.105, 0.048, 0.17))
+        hand_prof = capsule_profile(0.165, 0.034, 0.042, 0.12)
+        part("Hand." + S, lathe(hand_prof), aim_matrix(wr + d * 0.012, wr + d * 0.2, Vector((0, -1, 0))),
+             "hand." + S, scale=(1.30, 0.62, 1.0))
         tb = wr + d * 0.045 + Vector((0, -0.035, -0.006))
         part("Thumb." + S, lathe(capsule_profile(0.07, 0.016, 0.012, 0.05)),
              aim_matrix(tb, tb + Vector((sx * 0.7, -0.7, 0)), Vector((0, 0, 1))), "hand." + S)
@@ -411,7 +411,7 @@ def build_studio(coll):
 
     area("Key", (-3.0, -4.0, 4.0), (0, 0, 1.0), 3.0, 850, (1.0, 0.97, 0.92))
     area("Fill", (4.0, -3.5, 2.2), (0, 0, 1.0), 4.0, 280, (0.92, 0.95, 1.0))
-    area("Rim", (1.5, 3.0, 4.0), (0, 0, 1.3), 2.0, 600)
+    area("Rim", (0.8, 2.2, 5.5), (0, 0, 1.2), 2.0, 750)   # high: its back side stays above the frame
 
     cam_data = bpy.data.cameras.new("Camera")
     cam_data.lens = 50
