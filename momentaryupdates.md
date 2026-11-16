@@ -7,3 +7,5 @@
 **16.11.2026:** "you need to build tolerance in three levels. Beginner yogi, middle yogi and professional yogi. So then you measure alignment with less and less tolerance for professional and more tolerance for beginner. So beginner can just have a kind of approximation of the pose and he can go on. and when he achieved the pose, then new pose is coming and the voice say pose whatever pose is and it says basic cues about the pose and then user is looking at the skeleton on the screen and matches the pose"
 
 **16.11.2026:** "It needs to have record button. So it records the whole movement of the skeleton in one file. And then you need to build in my blender, it's installed here, a mannequin ... after recording I can say there is a command in my app render mannequin and then mannequin is getting animated and rendered on my desktop doing the same movement as I was doing"
+
+**16.11.2026:** "Yes, Sony and phone through Iriun or two phones or any combination."
