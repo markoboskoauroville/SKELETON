@@ -20,23 +20,53 @@ import VideoToolbox
 import CoreMedia
 
 final class PhoneSource: FrameSource {
-    static let displayName = "Manual Camera (Pixel, USB)"
     static let package = "com.mantraproductions.manualcamera"
     static let activity = "com.mantraproductions.manualcamera/com.mantraproductions.ndi.MainActivity"
     static let minVersion = 221
-    /// What the camera choice is remembered as.
-    static let savedID = "manualcamera.phone"
-    /// --camera pixel / phone / "manual camera"
-    static func matches(_ name: String) -> Bool {
-        let n = name.lowercased(); return n.contains("pixel") || n.contains("phone") || n.contains("manual camera") || n == savedID
+    /// --camera pixel / nothing / phone / "manual camera"
+    static func matches(_ name: String, _ p: PhoneEntry) -> Bool {
+        let n = name.lowercased()
+        if n == p.savedID.lowercased() || p.label.lowercased().contains(n) || p.hwSerial.lowercased() == n { return true }
+        return (n == "phone" || n == "manual camera") && p.model.lowercased().contains("pixel")
     }
 
-    /// The run's choices (UserDefaults phone.lens / phone.width / phone.fps / phone.mbps / phone.codec; defaults below).
+    // MARK: the phones Skeleton can see (scanned in the background: adb is never called on the main thread)
+
+    /// Every phone with Manual Camera on adb, one entry per phone (a phone on USB and Wi-Fi at once is one entry, USB).
+    private(set) static var known: [PhoneEntry] = []
+    /// The first scan has answered (until then a phone asked for or remembered is waited for, not replaced).
+    private(set) static var scannedOnce = false
+    private static var scanning = false
+    private static var scanTimer: DispatchSourceTimer?
+    /// Posted on the main queue when [known] changed.
+    static let changed = Notification.Name("PhoneSource.changed")
+
+    /// Starts the scan (every 4 s); the first answer comes within a second or two.
+    static func startScanning() {
+        guard scanTimer == nil, PhoneAdb.present else { return }
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        t.schedule(deadline: .now(), repeating: 4)
+        t.setEventHandler { scanOnce() }
+        t.resume(); scanTimer = t
+    }
+
+    private static func scanOnce() {
+        if scanning { return }; scanning = true; defer { scanning = false }
+        let found = PhoneAdb.phones()
+        DispatchQueue.main.async {
+            let first = !scannedOnce
+            scannedOnce = true
+            if first || found.map({ $0.key }) != known.map({ $0.key }) { known = found; NotificationCenter.default.post(name: changed, object: nil) }
+        }
+    }
+
+    /// The run's choices (UserDefaults phone.lens / phone.width / phone.fps / phone.mbps / phone.mbps.wifi / phone.codec).
     struct Options {
         var lens = "back_main"      // back_main (1x), back_wide (ultrawide), front, or L1..Ln
         var width = 1920            // 1920 (1080p) or 3840 (4K) or 1280
         var fps = 30
-        var mbps = 40
+        var mbps = 40               // on the USB cable (measured 16.11.2026: 30 fps, 40 Mbit/s, ~95 ms)
+        var mbpsWifi = 12           // over Wi-Fi (the Pixel's 2.4 GHz link: 40 fell to 18-22 fps and 0.5-0.9 s; 12 holds 30 fps, ~125 ms)
         var codec = "hevc"          // hevc or h264
         static func load() -> Options {
             let d = UserDefaults.standard; var o = Options()
@@ -44,25 +74,27 @@ final class PhoneSource: FrameSource {
             if d.integer(forKey: "phone.width") > 0 { o.width = d.integer(forKey: "phone.width") }
             if d.integer(forKey: "phone.fps") > 0 { o.fps = d.integer(forKey: "phone.fps") }
             if d.integer(forKey: "phone.mbps") > 0 { o.mbps = d.integer(forKey: "phone.mbps") }
+            if d.integer(forKey: "phone.mbps.wifi") > 0 { o.mbpsWifi = d.integer(forKey: "phone.mbps.wifi") }
             if let v = d.string(forKey: "phone.codec"), !v.isEmpty { o.codec = v }
             return o
         }
     }
 
     let options: Options
+    let phone: PhoneEntry
     private(set) var serial = ""
-    private(set) var hwSerial = ""
+    var hwSerial: String { phone.hwSerial }
     private(set) var overUSB = false
     private(set) var usbSpeed = ""            // the Mac's view of the cable (system_profiler)
     private(set) var status: [String: Any] = [:]
     private(set) var latencyMs: Double = 0    // sensor -> decoded on the Mac, median of the last second
     private(set) var decodedFps: Double = 0
     private var host = "127.0.0.1"
-    private var linkPort: UInt16 = 48110
-    private var statusPort: UInt16 = 48112
+    private var linkPort: UInt16 = 0
+    private var statusPort: UInt16 = 0
 
-    var name: String { Self.displayName }
-    var uniqueID: String { "manualcamera:\(hwSerial.isEmpty ? serial : hwSerial):\(options.lens):\(options.width)" }
+    var name: String { phone.label }
+    var uniqueID: String { "manualcamera:\(phone.hwSerial):\(options.lens):\(options.width)" }
     private(set) var intrinsics: Intrinsics?
     var clockNote: String { "phone sensor clock mapped to the Mac host clock (NTP-style over the status, ±\(String(format: "%.1f", bestRtt * 500)) ms)" }
     var onPixelBuffer: ((CVPixelBuffer, Double) -> Void)?
@@ -75,12 +107,12 @@ final class PhoneSource: FrameSource {
     var formatText: String {
         let st = status["stream"] as? [String: Any] ?? [:]
         let w = st["width"] as? Int ?? 0, h = st["height"] as? Int ?? 0
-        let fps = st["fps"] as? Double ?? 0, mb = st["mbps"] as? Double ?? 0
+        let mb = st["mbps"] as? Double ?? 0
         let codec = st["codec"] as? String ?? options.codec.uppercased()
         var s = w > 0 ? "\(w)x\(h)" : "\(options.width) px"
-        s += String(format: " %.1f fps %.0f Mbit/s %@", fps > 0 ? fps : decodedFps, mb, codec)
+        s += String(format: " %.1f fps %.0f Mbit/s %@", decodedFps, mb, codec)
         if latencyMs > 0 { s += String(format: " · %.0f ms", latencyMs) }
-        s += " · " + (overUSB ? "USB " + (usbSpeed.isEmpty ? "cable" : usbSpeed) : "Wi-Fi (plug the cable for the best picture)")
+        s += " · " + (overUSB ? "USB" + (usbSpeed.isEmpty ? "" : " " + usbSpeed) : "Wi-Fi " + host)
         return s
     }
 
@@ -98,7 +130,7 @@ final class PhoneSource: FrameSource {
     private var lats: [Double] = []
     private var frameTimes: [Double] = []
 
-    init(options: Options = .load()) { self.options = options }
+    init(phone: PhoneEntry, options: Options = .load()) { self.phone = phone; self.options = options }
 
     static var adbPresent: Bool { PhoneAdb.present }
 
@@ -114,35 +146,49 @@ final class PhoneSource: FrameSource {
     }
 
     private func fail(_ why: String) {
-        statusText = why; NSLog("[Skeleton] phone: %@", why)
+        statusText = why; NSLog("[Skeleton] phone %@: %@", phone.label, why)
         DispatchQueue.main.async { self.onError?(why) }
         finishStart(false)
     }
 
     private func bringUp() {
         guard PhoneAdb.present else { return fail("NO ADB at \(PhoneAdb.path)") }
-        statusText = "LOOKING FOR THE PIXEL ON ADB..."
-        guard let d = PhoneAdb.pickPhone() else { return fail("NO PIXEL ON ADB: plug the Pixel 7 in with the USB-C cable (USB debugging on)") }
-        serial = d.serial; overUSB = !d.wifi
-        hwSerial = PhoneAdb.shell(serial, "getprop ro.serialno").trimmingCharacters(in: .whitespacesAndNewlines)
+        let who = phone.short.uppercased()
+        // the cable when there is one; else the phone straight over the network, at its faster address
+        if let u = phone.usbSerial {
+            serial = u; overUSB = true; host = "127.0.0.1"
+            guard let lp = PhoneAdb.forward(u, remote: 48100), let sp = PhoneAdb.forward(u, remote: 48102) else {
+                return fail("\(who): ADB FORWARD FAILED") }
+            linkPort = lp; statusPort = sp
+            usbSpeed = PhoneAdb.macUsbSpeed(model: phone.model)
+        } else if let w = phone.wifiSerial {
+            serial = w; overUSB = false; linkPort = 48100; statusPort = 48102
+        } else { return fail("\(who): NOT ON ADB") }
         let v = PhoneAdb.cameraVersion(serial)
-        guard v > 0 else { return fail("MANUAL CAMERA IS NOT INSTALLED ON THE PIXEL") }
-        guard v >= Self.minVersion else { return fail("MANUAL CAMERA v\(v) ON THE PIXEL: v\(Self.minVersion) OR NEWER NEEDED (UPDATE IT)") }
-        if overUSB {
-            host = "127.0.0.1"; linkPort = 48110; statusPort = 48112
-            PhoneAdb.run(["-s", serial, "forward", "tcp:\(linkPort)", "tcp:48100"])
-            PhoneAdb.run(["-s", serial, "forward", "tcp:\(statusPort)", "tcp:48102"])
-            usbSpeed = PhoneAdb.macUsbSpeed(model: d.model)
-        } else {
-            host = String(serial.split(separator: ":").first ?? ""); linkPort = 48100; statusPort = 48102
-        }
-        // keep the phone awake on the cable while the camera runs (stays on while charging over USB)
+        guard v >= Self.minVersion else { return fail("\(who): MANUAL CAMERA v\(v) — v\(Self.minVersion) OR NEWER NEEDED (UPDATE IT)") }
         PhoneAdb.shell(serial, "input keyevent KEYCODE_WAKEUP")
-        statusText = "STARTING MANUAL CAMERA ON THE PIXEL..."
+        statusText = "STARTING MANUAL CAMERA ON THE \(who)..."
         let o = options
         PhoneAdb.run(["-s", serial, "shell", "am", "start", "-n", Self.activity, "--es", "mode", "skeleton", "--es", "lens", o.lens,
-                      "--ei", "width", "\(o.width)", "--ei", "fps", "\(o.fps)", "--ei", "mbps", "\(o.mbps)", "--es", "codec", o.codec,
-                      "--ei", "gop", "1", "--es", "lock", "ae,awb", "--es", "flicker", "50", "--es", "stab", "off", "--ez", "dim", "true"])
+                      "--ei", "width", "\(o.width)", "--ei", "fps", "\(o.fps)", "--ei", "mbps", "\(overUSB ? o.mbps : o.mbpsWifi)",
+                      "--es", "codec", o.codec, "--ei", "gop", "1", "--es", "lock", "ae,awb", "--es", "flicker", "50",
+                      "--es", "stab", "off", "--ez", "dim", "true"])
+        if !overUSB {
+            // Wi-Fi: the phone's LAN address and its adb address (Tailscale), the one whose status answers fastest
+            var cands: [String] = []
+            if let lan = PhoneAdb.wifiAddress(serial) { cands.append(lan) }
+            let adbHost = String(serial.split(separator: ":").first ?? "")
+            if !adbHost.isEmpty && !cands.contains(adbHost) { cands.append(adbHost) }
+            let deadline = Date().addingTimeInterval(12)
+            var best: (String, Double)?
+            while best == nil && Date() < deadline && !stopped {
+                for c in cands { if let r = Self.statusRtt(c) { if best == nil || r < best!.1 { best = (c, r) } } }
+                if best == nil { Thread.sleep(forTimeInterval: 0.5) }
+            }
+            guard let b = best else { return fail("\(who): NOT REACHABLE OVER THE NETWORK (\(cands.joined(separator: ", ")))") }
+            host = b.0
+            NSLog("[Skeleton] phone %@: Wi-Fi via %@ (%.0f ms; tried %@)", phone.label, host, b.1 * 1000, cands.joined(separator: ", "))
+        }
         // the camera answers its status in skeleton mode
         let deadline = Date().addingTimeInterval(12)
         var ready = false
@@ -151,7 +197,7 @@ final class PhoneSource: FrameSource {
             Thread.sleep(forTimeInterval: 0.4)
         }
         guard !stopped else { return }
-        guard ready else { return fail("THE CAMERA DID NOT ANSWER (is the Pixel unlocked? Manual Camera in front?)") }
+        guard ready else { return fail("\(phone.short.uppercased()): THE CAMERA DID NOT ANSWER (phone unlocked? Manual Camera allowed the camera?)") }
         statusText = "CONNECTING TO THE CAMERA'S STREAM..."
         decoder.onImage = { [weak self] pb, ptsUs in self?.decoded(pb, ptsUs) }
         let l = PhoneLink(host: host, port: linkPort)
@@ -167,8 +213,22 @@ final class PhoneSource: FrameSource {
         statusTimer = t
         q.asyncAfter(deadline: .now() + 12) { [weak self] in
             guard let self = self, self.startCompletion != nil else { return }
-            self.fail("NO PICTURE FROM THE PIXEL IN 12 S" + (self.overUSB ? "" : " (over Wi-Fi: plug the USB cable)"))
+            self.fail("\(self.phone.short.uppercased()): NO PICTURE IN 12 S" + (self.overUSB ? "" : " (over Wi-Fi: plug the USB cable)"))
         }
+    }
+
+    /// One status request to <host>:48102: its round trip in seconds, or nil (not answering in skeleton mode).
+    static func statusRtt(_ host: String) -> Double? {
+        guard let url = URL(string: "http://\(host):48102/status") else { return nil }
+        var req = URLRequest(url: url); req.timeoutInterval = 1.5
+        let sem = DispatchSemaphore(value: 0); var ok = false
+        let t0 = Date()
+        URLSession.shared.dataTask(with: req) { d, _, _ in
+            if let d = d, let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any], o["mode"] as? String == "skeleton" { ok = true }
+            sem.signal()
+        }.resume()
+        _ = sem.wait(timeout: .now() + 2)
+        return ok ? Date().timeIntervalSince(t0) : nil
     }
 
     private func tick() {
@@ -224,7 +284,7 @@ final class PhoneSource: FrameSource {
         q.async { self.frameTimes.append(now) }
         if !started {
             started = true
-            statusText = "PICTURE FROM THE PIXEL"
+            statusText = "PICTURE FROM THE \(phone.short.uppercased())"
             finishStart(true)
         }
         onPixelBuffer?(pb, t)
@@ -240,7 +300,7 @@ final class PhoneSource: FrameSource {
         DispatchQueue.global().async {
             // the camera back to its own settings (Marko's), the forwards removed
             PhoneAdb.run(["-s", s, "shell", "am", "start", "-n", Self.activity, "--es", "mode", "off"])
-            if usb { PhoneAdb.run(["-s", s, "forward", "--remove", "tcp:\(lp)"]); PhoneAdb.run(["-s", s, "forward", "--remove", "tcp:\(sp)"]) }
+            if usb && lp > 0 { PhoneAdb.run(["-s", s, "forward", "--remove", "tcp:\(lp)"]); PhoneAdb.run(["-s", s, "forward", "--remove", "tcp:\(sp)"]) }
         }
     }
 }
@@ -423,6 +483,21 @@ final class PhoneDecoder {
 
 struct PhoneDevice { let serial: String; let model: String; var wifi: Bool { serial.contains(":") } }
 
+/// One phone (by its hardware serial), reachable on USB, on adb over Wi-Fi, or both.
+struct PhoneEntry {
+    let hwSerial: String
+    let model: String          // "Pixel 7", "A142"
+    let maker: String          // "Google", "Nothing"
+    var usbSerial: String?
+    var wifiSerial: String?
+    var version: Int
+    var short: String { model.lowercased().hasPrefix(maker.lowercased()) || maker == "Google" ? model : maker + " " + model }
+    var transport: String { usbSerial != nil ? "USB" : "Wi-Fi" }
+    var label: String { "Manual Camera (\(short), \(transport))" }
+    var savedID: String { "manualcamera:" + hwSerial }
+    var key: String { label + "|\(version)" }
+}
+
 enum PhoneAdb {
     static let path = NSHomeDirectory() + "/Library/Android/sdk/platform-tools/adb"
     static var present: Bool { FileManager.default.isExecutableFile(atPath: path) }
@@ -448,18 +523,41 @@ enum PhoneAdb {
         }
     }
 
-    /// The Pixel (any phone with Manual Camera when no Pixel), on USB before Wi-Fi. Never another phone by mistake:
-    /// a phone without Manual Camera is skipped.
-    static func pickPhone() -> PhoneDevice? {
-        let all = devices().filter { !$0.serial.hasPrefix("emulator-") }
-        let ranked = all.sorted { a, b in
-            let pa = a.model.lowercased().contains("pixel"), pb = b.model.lowercased().contains("pixel")
-            if pa != pb { return pa }
-            return !a.wifi && b.wifi
+    /// Every phone with Manual Camera, grouped by its hardware serial (USB and Wi-Fi of one phone are one entry).
+    static func phones() -> [PhoneEntry] {
+        var out: [PhoneEntry] = []
+        for d in devices() where !d.serial.hasPrefix("emulator-") {
+            let v = cameraVersion(d.serial)
+            guard v > 0 else { continue }           // a phone without Manual Camera is never touched
+            let props = shell(d.serial, "getprop ro.serialno; getprop ro.product.model; getprop ro.product.manufacturer")
+                .split(separator: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            let hw = props.count > 0 && !props[0].isEmpty ? props[0] : d.serial
+            let model = props.count > 1 && !props[1].isEmpty ? props[1] : d.model.replacingOccurrences(of: "_", with: " ")
+            let maker = props.count > 2 ? props[2] : ""
+            if let i = out.firstIndex(where: { $0.hwSerial == hw }) {
+                if d.wifi { out[i].wifiSerial = d.serial } else { out[i].usbSerial = d.serial }
+            } else {
+                out.append(PhoneEntry(hwSerial: hw, model: model, maker: maker, usbSerial: d.wifi ? nil : d.serial,
+                                      wifiSerial: d.wifi ? d.serial : nil, version: v))
+            }
         }
-        // one physical phone may be listed twice (USB and Wi-Fi): the USB one comes first in the ranking
-        return ranked.first { a in a.model.lowercased().contains("pixel") && cameraVersion(a.serial) > 0 }
-            ?? ranked.first { cameraVersion($0.serial) > 0 }
+        // the Pixel first, then by name: a stable order in the camera list
+        return out.sorted { a, b in
+            let pa = a.model.lowercased().contains("pixel"), pb = b.model.lowercased().contains("pixel")
+            return pa != pb ? pa : a.label < b.label
+        }
+    }
+
+    /// `adb forward tcp:0 tcp:<remote>`: a free local port, chosen by adb (several phones at once never collide).
+    static func forward(_ serial: String, remote: Int) -> UInt16? {
+        UInt16(run(["-s", serial, "forward", "tcp:0", "tcp:\(remote)"]).trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// The phone's own Wi-Fi address (wlan0), or nil.
+    static func wifiAddress(_ serial: String) -> String? {
+        let out = shell(serial, "ip -4 addr show wlan0")
+        guard let r = out.range(of: #"inet (\d+\.\d+\.\d+\.\d+)"#, options: .regularExpression) else { return nil }
+        return String(out[r].dropFirst(5))
     }
 
     static func cameraVersion(_ serial: String) -> Int {

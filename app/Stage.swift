@@ -160,7 +160,7 @@ final class StageView: NSView {
         if target == nil && !isSecondary {
             let long = "LOAD A POSE PHOTO (OR DROP ONE HERE), OR FREEZE YOUR POSE, OR START A SESSION"
             let short = "LOAD OR FREEZE A POSE, OR START A SESSION"
-            text(bounds.width > 820 ? long : short, at: CGPoint(x: area.midX, y: area.maxY - 76),
+            text(bounds.width > 820 ? long : short, at: CGPoint(x: area.midX, y: area.maxY - 100),
                  size: bounds.width > 820 ? 12 : 11, color: .white.withAlphaComponent(0.7), center: true, back: true)
         }
     }

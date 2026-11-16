@@ -126,6 +126,8 @@ final class MainView: NSView, NSMenuDelegate {
         let nc = NotificationCenter.default
         nc.addObserver(self, selector: #selector(devicesChanged), name: .AVCaptureDeviceWasConnected, object: nil)
         nc.addObserver(self, selector: #selector(devicesChanged), name: .AVCaptureDeviceWasDisconnected, object: nil)
+        nc.addObserver(self, selector: #selector(devicesChanged), name: PhoneSource.changed, object: nil)   // phones on adb (PhoneSource.swift)
+        PhoneSource.startScanning()
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.tick() }
         NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDown, .leftMouseDragged, .scrollWheel]) { [weak self] e in
             self?.wake(); return e
@@ -181,7 +183,7 @@ final class MainView: NSView, NSMenuDelegate {
             guard let self = self else { return }
             self.stage.mirror = on
             if let d = self.device { self.defaults.set(on, forKey: "mirror." + d.uniqueID) }
-            else if self.slots.first?.phone != nil { self.defaults.set(on, forKey: "mirror.phone") }
+            else if let ph = self.slots.first?.phone { self.defaults.set(on, forKey: "mirror." + ph.phone.savedID) }
         }
         anglesSw = SwitchRow("SHOW ANGLES", on: defaults.bool(forKey: "angles")); anglesSw.onChange = { [weak self] on in
             self?.stage.showAngles = on; self?.defaults.set(on, forKey: "angles") }
@@ -484,20 +486,33 @@ final class MainView: NSView, NSMenuDelegate {
         for p in camPopups {
             p.removeAllItems()
             for d in devices { p.addItem(withTitle: d.localizedName) }
-            if PhoneSource.adbPresent { p.addItem(withTitle: PhoneSource.displayName) }   // index devices.count
+            for ph in phones { p.addItem(withTitle: ph.label) }   // the phones with Manual Camera: index devices.count + j
         }
-        if devices.isEmpty && !PhoneSource.adbPresent { cameraPopup.addItem(withTitle: "NO CAMERA"); stage.cameraName = ""; return }
+        if devices.isEmpty && phones.isEmpty { cameraPopup.addItem(withTitle: "NO CAMERA"); stage.cameraName = ""; return }
         var taken: [String] = []
+        var waitForPhones = false
         for k in 0..<slots.count {
             let popup = camPopups[k]
-            // the phone: asked for by name (--camera pixel), kept while it runs, or remembered
+            // a phone: asked for by name (--camera pixel / nothing), kept while it runs, or remembered
             let asked = k < pendingCams.count && !pendingCams[k].isEmpty ? pendingCams[k] : (k == 0 ? pendingCamera : nil)
-            let phoneAsked = asked.map { PhoneSource.matches($0) } ?? false
-            let phoneSaved = asked == nil && defaults.string(forKey: k == 0 ? "camera" : "camera\(k)") == PhoneSource.savedID
-            if PhoneSource.adbPresent && (phoneAsked || (slots[k].phone != nil && asked == nil) || (phoneSaved && slots[k].device == nil)) {
-                popup.selectItem(at: devices.count)
-                if slots[k].phone == nil { selectPhone(slot: k) }
+            let saved = defaults.string(forKey: k == 0 ? "camera" : "camera\(k)")
+            let free = phones.filter { !taken.contains($0.savedID) }
+            var ph: PhoneEntry?
+            if let a = asked { ph = free.first { PhoneSource.matches(a, $0) } }
+            else if let cur = slots[k].phone { ph = free.first { $0.hwSerial == cur.hwSerial } }
+            else if slots[k].device == nil, let id = saved { ph = free.first { $0.savedID == id } }
+            if let ph = ph, let j = phones.firstIndex(where: { $0.hwSerial == ph.hwSerial }) {
+                taken.append(ph.savedID)
+                popup.selectItem(at: devices.count + j)
+                if slots[k].phone?.hwSerial != ph.hwSerial { selectPhone(ph, slot: k) }
                 continue
+            }
+            if asked == nil, slots[k].phone != nil { continue }   // a running phone off adb for a moment: left running
+            // the phones are not scanned yet: a phone asked for or remembered is waited for
+            if !PhoneSource.scannedOnce && PhoneSource.adbPresent {
+                let wantsPhone = saved?.hasPrefix("manualcamera:") == true && asked == nil
+                let askedNoAV = asked.map { a in !devices.contains { $0.localizedName.lowercased().contains(a.lowercased()) } } ?? false
+                if wantsPhone || askedNoAV { waitForPhones = true; continue }
             }
             var pick: AVCaptureDevice?
             if k < pendingCams.count, !pendingCams[k].isEmpty {
@@ -515,7 +530,7 @@ final class MainView: NSView, NSMenuDelegate {
             let changed = slots[k].device?.uniqueID != p.uniqueID
             if changed || (k == 0 && pendingCamera != nil) { select(p, slot: k) }
         }
-        pendingCamera = nil; pendingCams = []
+        if !waitForPhones { pendingCamera = nil; pendingCams = [] }
     }
 
     @objc func cameraChosen() { chooseCamera(0, cameraPopup) }
@@ -526,7 +541,7 @@ final class MainView: NSView, NSMenuDelegate {
     func chooseCamera(_ k: Int, _ popup: NSPopUpButton) {
         let i = popup.indexOfSelectedItem
         guard k < slots.count else { return }
-        if i == devices.count && PhoneSource.adbPresent { selectPhone(slot: k); return }
+        if i >= devices.count && i - devices.count < phones.count { selectPhone(phones[i - devices.count], slot: k); return }
         guard i >= 0, i < devices.count else { return }
         select(devices[i], slot: k)
     }
@@ -560,19 +575,23 @@ final class MainView: NSView, NSMenuDelegate {
         }
     }
 
-    /// "Manual Camera (Pixel, USB)": PhoneSource starts the camera on the Pixel over adb and streams it over the cable.
-    func selectPhone(slot k: Int) {
+    /// The phones with Manual Camera v221+ on adb (PhoneSource scans in the background).
+    var phones: [PhoneEntry] { PhoneSource.known }
+
+    /// "Manual Camera (Pixel 7, USB)" / "(A142, Wi-Fi)": PhoneSource starts the camera on that phone over adb and takes
+    /// its stream over the cable (adb forward) or, without one, straight over the network.
+    func selectPhone(_ ph: PhoneEntry, slot k: Int) {
         let s = slots[k]
-        let src = PhoneSource()
+        let src = PhoneSource(phone: ph)
         s.device = nil
         s.phone = src
-        defaults.set(PhoneSource.savedID, forKey: k == 0 ? "camera" : "camera\(k)")
-        let m = defaults.object(forKey: "mirror.phone") as? Bool ?? false
+        defaults.set(ph.savedID, forKey: k == 0 ? "camera" : "camera\(k)")
+        let m = defaults.object(forKey: "mirror." + ph.savedID) as? Bool ?? false
         s.stage.mirror = m
         if k == 0 { mirrorSw.isOn = m }
-        s.stage.cameraName = PhoneSource.displayName
+        s.stage.cameraName = ph.label
         s.size = .zero; s.hist = []; s.sizeWarned = false
-        s.formatText = "starting the Pixel..."
+        s.formatText = "starting the \(ph.short)..."
         s.pipe.attach(src)
         src.onError = { [weak s] t in s?.stage.toast(t) }
         src.onStatusText = { [weak self, weak s, weak src] t in
