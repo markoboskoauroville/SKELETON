@@ -1,7 +1,7 @@
 // App.swift: the app, its window (a standard NSWindow), the one title, the menu.
 import AppKit
 
-let VERSION = 4
+let VERSION = 5
 let APP_NAME = "Skeleton (Mantra)"
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {

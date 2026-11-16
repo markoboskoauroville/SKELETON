@@ -137,8 +137,10 @@ final class StageView: NSView {
             text("NO PERSON SEEN", at: CGPoint(x: area.midX, y: area.maxY - 60), size: 12, color: .white.withAlphaComponent(0.7), center: true, back: true)
         }
         if target == nil && !isSecondary {
-            text("LOAD A POSE PHOTO (OR DROP ONE HERE), OR FREEZE YOUR POSE, OR START A SESSION", at: CGPoint(x: area.midX, y: area.maxY - 28),
-                 size: 12, color: .white.withAlphaComponent(0.7), center: true, back: true)
+            let long = "LOAD A POSE PHOTO (OR DROP ONE HERE), OR FREEZE YOUR POSE, OR START A SESSION"
+            let short = "LOAD OR FREEZE A POSE, OR START A SESSION"
+            text(bounds.width > 820 ? long : short, at: CGPoint(x: area.midX, y: area.maxY - 76),
+                 size: bounds.width > 820 ? 12 : 11, color: .white.withAlphaComponent(0.7), center: true, back: true)
         }
     }
 
