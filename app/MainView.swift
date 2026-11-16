@@ -53,12 +53,13 @@ final class Slot {
     var startedAt = Date()
     var lastFrameWall = Date.distantPast
     var blackSince: Date?
+    var still = StaticWatch()            // a placeholder logo never changes: no person ever seen + no change for 2 s = no picture (static)
     var goodSince: Date?
     var lastRestart = Date()
     var missingText: String?             // non-nil: no tile, listed below the grid with a button
     var offlineNote: String?
     /// A source was (re)started: the check begins again, but a hidden tile stays hidden until a good picture comes.
-    func restarted() { startedAt = Date(); lastFrameWall = .distantPast; blackSince = nil; goodSince = nil }
+    func restarted() { startedAt = Date(); lastFrameWall = .distantPast; blackSince = nil; goodSince = nil; still.reset() }
     var phone: PhoneSource?              // "Manual Camera (Pixel, USB)" (PhoneSource.swift) instead of an AVCapture device
     var uid: String { device?.uniqueID ?? phone?.uniqueID ?? "" }
 }
@@ -78,6 +79,8 @@ final class MainView: NSView, NSMenuDelegate {
     var useSw: [SwitchRow] = []
     var pairData: [String: [([V2], [V2])]] = [:]
     var pairLast: [String: [V2]] = [:]
+    var baViews: [BAView] = []           // every board capture seen by 2+ cameras together (bundle adjustment)
+    var baIndex: [String: Int] = [:]
     var positioned: Set<Int> = [0]
     var calStep = CalStep.idle
     var measureStart = 0.0
@@ -115,6 +118,8 @@ final class MainView: NSView, NSMenuDelegate {
     var builtin: [NamedPose] = []
     var saved: [NamedPose] = []
     var session: [NamedPose]?
+    let sequencePopup = NSPopUpButton()
+    var sequences: [Store.Sequence] = []
     var sessionIndex = 0
     var lastMove = Date()
     var openMenus = 0
@@ -229,7 +234,14 @@ final class MainView: NSView, NSMenuDelegate {
         levelSeg.target = self; levelSeg.action = #selector(levelChanged)
         levelSeg.setAccessibilityLabel("LEVEL")
         stage.level = Level(rawValue: max(0, levelSeg.selectedSegment)) ?? .beginner
-        let r3 = row([savedPopup, lvl, levelSeg, button("CLEAR TARGET", #selector(clearTarget)), button("SETTINGS", #selector(showSettings))])
+        sequences = Store.sequences()
+        sequencePopup.addItem(withTitle: "ALL POSES")
+        for q in sequences { sequencePopup.addItem(withTitle: q.name.uppercased()) }
+        sequencePopup.selectItem(at: min(sequencePopup.numberOfItems - 1, max(0, defaults.integer(forKey: "sequence"))))
+        sequencePopup.target = self; sequencePopup.action = #selector(sequenceChosen)
+        sequencePopup.setAccessibilityLabel("SEQUENCE")
+        sequencePopup.widthAnchor.constraint(equalToConstant: 130).isActive = true
+        let r3 = row([savedPopup, sequencePopup, lvl, levelSeg, button("CLEAR TARGET", #selector(clearTarget)), button("SETTINGS", #selector(showSettings))])
 
         recPopup.widthAnchor.constraint(equalToConstant: 300).isActive = true
         recPopup.setAccessibilityLabel("RECORDINGS")
@@ -746,8 +758,18 @@ final class MainView: NSView, NSMenuDelegate {
 
     @objc func toggleSession() { session == nil ? startSession() : endSession(say: true) }
 
+    @objc func sequenceChosen() { defaults.set(sequencePopup.indexOfSelectedItem, forKey: "sequence") }
+
+    /// The poses of the chosen sequence (ALL POSES = starters + saved); a missing id is left out.
+    func sessionPoses() -> [NamedPose] {
+        let i = sequencePopup.indexOfSelectedItem
+        guard i > 0, i - 1 < sequences.count else { return builtin + saved }
+        let byId = Dictionary(builtin.compactMap { p in p.id.map { ($0, p) } }, uniquingKeysWith: { a, _ in a })
+        return sequences[i - 1].poses.compactMap { byId[$0] }
+    }
+
     func startSession() {
-        let all = builtin + saved
+        let all = sessionPoses()
         guard !all.isEmpty else { stage.toast("NO POSES FOUND"); return }
         session = all; sessionIndex = 0
         setTitle(sessionButton, "3  STOP SESSION"); skipButton.isHidden = false

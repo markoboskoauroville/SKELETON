@@ -16,6 +16,16 @@ enum Store {
         return list.map { $0.named() }
     }
 
+    struct Sequence: Codable { var id: String; var name: String; var poses: [String] }
+
+    /// Ready sequences (data/sequences.json): a name and the ids of starter poses, in order (a pose may come twice).
+    static func sequences() -> [Sequence] {
+        guard let u = Bundle.main.url(forResource: "sequences", withExtension: "json"),
+              let d = try? Data(contentsOf: u),
+              let list = try? JSONDecoder().decode([Sequence].self, from: d) else { return [] }
+        return list
+    }
+
     static func safe(_ s: String) -> String { s.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-") }
 
     static func save(_ n: NamedPose) {

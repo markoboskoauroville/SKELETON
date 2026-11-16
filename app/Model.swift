@@ -160,13 +160,14 @@ struct NamedPose {
     var speak: String?
     var cues: [String]
     var thumb: CGImage?
+    var id: String? = nil
 }
 
 extension SavedPose {
     func named() -> NamedPose {
         var p = Pose(aspect: CGFloat(aspect))
         for (k, v) in joints { if let jt = Jt(rawValue: k), v.count == 2 { p.j[jt] = CGPoint(x: v[0] * aspect, y: v[1]) } }
-        return NamedPose(pose: p, name: name, speak: speak, cues: cues ?? [], thumb: nil)
+        return NamedPose(pose: p, name: name, speak: speak, cues: cues ?? [], thumb: nil, id: id)
     }
     static func from(_ n: NamedPose) -> SavedPose {
         var j: [String: [Double]] = [:]

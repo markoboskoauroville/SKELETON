@@ -59,6 +59,7 @@ struct Frame {
     var t: Double            // host clock seconds
     var lum: Double
     var lumStd = 0.0
+    var sig: [UInt8] = []   // 48 x 27 luminance signature (static picture check)
     var v3: V3Obs?
     var analyzed = true      // false: only the picture is new, the poses are the last analysed ones (see Pipeline.analysisEvery)
 }
@@ -231,7 +232,7 @@ final class Pipeline {
         lastPoses = poses
         let v3 = req3?.results?.first.map { extract3D($0) }
         let luma = lumaStats(pb)
-        let f = Frame(image: img, size: CGSize(width: w, height: h), poses: poses, raw: raw, t: t, lum: luma.mean, lumStd: luma.std, v3: v3)
+        let f = Frame(image: img, size: CGSize(width: w, height: h), poses: poses, raw: raw, t: t, lum: luma.mean, lumStd: luma.std, sig: lumaSignature(pb), v3: v3)
         let cb = onFrame
         DispatchQueue.main.async { cb?(f) }
     }

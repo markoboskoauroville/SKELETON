@@ -163,3 +163,23 @@ upward-dog (2D side-view keypoints, cues) to data/poses.json; existing ids are n
 ## Several cameras (v4 to v14, 16.11.2026)
 Up to four sources (FrameSource protocol, Source.swift): AVCameraSource (Camera.swift) and PhoneSource (another worker). Each has a Pipeline (Vision 2D, 3D while recording) and a Slot (MainView.swift) with its StageView tile. MultiCam.swift: triangulation (all views that see a joint, confidence-weighted, a disagreeing view rejected, TriResult with per-camera quality), the calibration wizard (CALIBRATE: intrinsics of every camera together from the circle-grid board, then each camera positioned by pairs with one already positioned and chained into camera 1's frame), MEASURE DELAY (flash or motion cross-correlation), USE CAMERA switches. app/Calib: Linalg, CamModel (fisheye KB4, solvePnP, Zhang-style start, LM refinement, stereo), Board (PDF + detector), Triangulate (DLT, sync, frontal pose). tests/main.swift runs in the workflow. Calibrations: Application Support/Skeleton (Mantra)/calibration/*.json by camera unique ID. Not done: bundle adjustment over all cameras (pairs are chained), a live check of the calibration with real board prints (needs Marko to print the board), triangulation tested only on synthetic data.
 Launch: `--cameras "ILCE-7M5,FaceTime,pixel,nothing"` (names or parts of names).
+
+
+## v15 (16.11.2026): static pictures, bundle adjustment, built-in screen, Wyoga
+
+- Static placeholder (app/Calib/StaticWatch.swift, MultiCam.checkPicture): every analysed frame carries a 48 x 27 luminance signature
+  (Frame.sig, lumaSignature in Source.swift). A source whose frames differ by under 0.4 (mean of 255) over 2 s and in which no person was
+  ever seen is "no picture (static)": no tile, a text line with RETRY, checked again by itself (clears after 0.5 s of a changing picture or the
+  first person). Black pictures keep "no picture". Phone sources are not tested (real cameras with their own watchdog).
+- Bundle adjustment (app/Calib/BundleAdjust.swift, `bundleAdjust`): after the chained pair calibration every camera pose (camera 1 fixed),
+  every board view and optionally every intrinsic set is refined together by Levenberg-Marquardt on block-sparse normal equations
+  (each observation's Jacobian block numeric, J^T J / J^T r through Accelerate cblas_dsyrk / cblas_dgemv). Views = every board capture seen by
+  2+ cameras together (MainView.baViews, filled in the pair stage). Run by `runBundleAdjust()` at the end of finishCalibration; kept only when
+  the reprojection error drops; the toast and wizard line give "ERROR a PX, WAS b PX". Intrinsics only with UserDefaults ba.intrinsics (default off).
+  Unit tests (tests/main.swift section 8): 4-camera synthetic rigs, 0.8 px noise, chained vs adjusted positions and rotations, intrinsics.
+- Window: App.placeOnBuiltInScreen: first launch, or a saved frame on a non-built-in screen that he did not choose, opens centred on the
+  NSScreen whose localizedName contains "Built-in" (CGDisplayIsBuiltin as fallback). A later move to another screen sets window.screenChosen
+  and is kept.
+- Wyoga: data/sequences.json (bundled) lists ready sequences by starter pose id; the SEQUENCE popup (ALL POSES / WYOGA) in row 3 picks what
+  START SESSION runs. Wyoga = Upward Salute, Down Dog, Warrior II, Tree, then the Sun Salutation (Mountain, Upward Salute, Forward Fold, Plank,
+  Chaturanga, Upward Dog, Down Dog, Forward Fold, Upward Salute, Mountain). ALL POSES = the ten starters (the five floor poses are in) + saved.

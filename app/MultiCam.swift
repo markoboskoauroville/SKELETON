@@ -61,16 +61,22 @@ extension MainView {
 
     // MARK: black pictures and sources that stopped
 
-    /// Black or uniform for over a second (mean under 8 of 255, almost no variation): no picture. Back after half a second of a real one.
+    /// Black or uniform for over a second (mean under 8 of 255, almost no variation): no picture. A picture that does not change
+    /// for 2 s while no person was ever seen (the OBS Virtual Camera's placeholder logo) is "no picture (static)". Phones are
+    /// real cameras with their own watchdog and are not tested for this. Back after half a second of a real picture.
     func checkPicture(_ s: Slot, _ f: Frame) {
         guard f.lum >= 0 else { return }
         let now = Date()
-        if f.lum < 8 && f.lumStd < 4 {
+        var still = false
+        if s.phone == nil { still = s.still.add(t: f.t, sig: f.sig, person: !f.poses.isEmpty) }
+        let black = f.lum < 8 && f.lumStd < 4
+        if black || still {
             s.goodSince = nil
-            if s.blackSince == nil { s.blackSince = now }
-            if s.missingText == nil, now.timeIntervalSince(s.blackSince!) > 1.2, now.timeIntervalSince(s.startedAt) > 1 {
-                setMissing(s, "no picture")
-            }
+            if black { if s.blackSince == nil { s.blackSince = now } } else { s.blackSince = nil }
+            let why = black ? "no picture" : "no picture (static)"
+            var ready = true
+            if black, let since = s.blackSince { ready = now.timeIntervalSince(since) > 1.2 && now.timeIntervalSince(s.startedAt) > 1 }
+            if ready, s.missingText != why { setMissing(s, why) }
         } else {
             s.blackSince = nil
             if s.goodSince == nil { s.goodSince = now }
@@ -314,7 +320,7 @@ extension MainView {
     func startCalibration() {
         resetBoardState()
         for s in slots { s.calViews = []; s.lastCap = nil; s.solving = false }
-        pairData = [:]; pairLast = [:]
+        pairData = [:]; pairLast = [:]; baViews = []; baIndex = [:]
         positioned = [0]
         for k in activeIdx where k > 0 && slots[k].extr != nil && slots[k].intr != nil { positioned.insert(k) }
         if activeIdx.contains(where: { slots[$0].intr == nil }) {
@@ -325,7 +331,7 @@ extension MainView {
 
     func startPairs() {
         resetBoardState()
-        pairData = [:]; pairLast = [:]
+        pairData = [:]; pairLast = [:]; baViews = []; baIndex = [:]
         if activeIdx.allSatisfy({ positioned.contains($0) }) { finishCalibration(); return }
         calStep = .pair
         calibTick()
@@ -337,6 +343,46 @@ extension MainView {
         setWizard("CALIBRATION READY: REPROJECTION " + e + " PX")
         wizardClear = Date().addingTimeInterval(8)
         setTitle(calibrateButton, "RECALIBRATE")
+        runBundleAdjust()
+    }
+
+    /// After the pairwise, chained calibration: all cameras' poses together by minimising the reprojection error of every
+    /// board capture (bundle adjustment, BundleAdjust.swift). Kept only when the error went down.
+    func runBundleAdjust() {
+        let views = baViews
+        let ids = activeIdx
+        guard ids.count > 2, views.count >= 6, views.contains(where: { $0.obs[0] != nil }) else { return }
+        let dummy = Intrinsics(fx: 1000, fy: 1000, cx: 960, cy: 540, k: [0, 0, 0, 0], width: 1920, height: 1080)
+        let Ks = slots.map { $0.intr ?? dummy }
+        let poses = slots.enumerated().map { (k, s) -> Pose6 in
+            guard k > 0, let E = s.extr?.E else { return Pose6(r: V3(0, 0, 0), t: V3(0, 0, 0)) }
+            return Pose6(r: V3(E.r[0], E.r[1], E.r[2]), t: V3(E.t[0], E.t[1], E.t[2]))
+        }
+        let board = BoardSpec.points(a3: a3)
+        let refineK = defaults.bool(forKey: "ba.intrinsics")
+        DispatchQueue.global(qos: .userInitiated).async {
+            let res = bundleAdjust(K: Ks, poses: poses, views: views, board: board, refineIntrinsics: refineK)
+            DispatchQueue.main.async {
+                guard let r = res, r.rmsAfter < r.rmsBefore else { return }
+                for k in ids where k > 0 {
+                    guard let old = self.slots[k].extr else { continue }
+                    let p = r.poses[k]
+                    let E = Extrinsics(r: [p.r.x, p.r.y, p.r.z], t: [p.t.x, p.t.y, p.t.z], rms: r.perCamera[k], pairs: old.E.pairs)
+                    var st = old; st.E = E; st.date = CalibStore.now()
+                    self.slots[k].extr = st; CalibStore.save(st)
+                }
+                if refineK {
+                    for k in ids {
+                        self.slots[k].intr = r.K[k]
+                        if var info = self.slots[k].intrInfo { info.K = r.K[k]; self.slots[k].intrInfo = info; CalibStore.save(info) }
+                    }
+                }
+                let msg = String(format: "BUNDLE ADJUSTMENT OVER %d BOARD VIEWS: ERROR %.2f PX, WAS %.2f PX", r.views, r.rmsAfter, r.rmsBefore)
+                self.setWizard("CALIBRATION READY. " + msg)
+                self.wizardClear = Date().addingTimeInterval(8)
+                self.stage.toast(msg)
+            }
+        }
     }
 
     func detect(_ s: Slot, _ f: Frame) {
@@ -407,6 +453,9 @@ extension MainView {
                     guard !s.solving, let ba = a.lastBoard, let bs = s.lastBoard, a.stable >= 2, s.stable >= 2, abs(ba.t - bs.t) < 0.3 else { continue }
                     if let last = pairLast[key], !diverse(last, ba.pts, width: Double(a.size.width)) { continue }
                     pairData[key, default: []].append((ba.pts, bs.pts)); pairLast[key] = ba.pts
+                    let vk = "\(i)@\(bs.t)"
+                    if let vi = baIndex[vk] { baViews[vi].obs[j] = ba.pts }
+                    else { baIndex[vk] = baViews.count; baViews.append(BAView(obs: [j: ba.pts, i: bs.pts])) }
                     best = max(best, pairData[key]!.count)
                     if pairData[key]!.count >= 12 { solvePair(j, i); break }
                 }

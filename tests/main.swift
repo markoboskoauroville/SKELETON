@@ -138,6 +138,104 @@ for ang in [25.0, 110.0, 200.0, 300.0] {
     } else { check(false, "board not detected at \(ang) deg") }
 }
 
+// 8. bundle adjustment on synthetic rigs of 4 cameras with 0.8 px noise: pairs are chained (camera i from camera i-1, 12 pairs
+// each, as the app does) and then every camera is refined together over all board views.
+do {
+    func lookAt(_ C: V3, _ target: V3) -> Pose6 {
+        let f = normalize(target - C)
+        let right = normalize(cross(V3(0, 1, 0), f))
+        let down = cross(f, right)
+        let R = rowsMatrix(right, down, f)
+        return Pose6(r: rodriguesInv(R), t: -(R * C))
+    }
+    func compose(_ e: Extrinsics, _ prev: Pose6?) -> Pose6 {
+        guard let p = prev else { return Pose6(r: rodriguesInv(e.R), t: e.T) }
+        return Pose6(r: rodriguesInv(e.R * p.R), t: e.R * p.t + e.T)
+    }
+    func centre(_ p: Pose6) -> V3 { -(p.R.transpose * p.t) }
+    let target = V3(0.15, 0, 0.8)
+    let truth: [Pose6] = [Pose6(r: V3(0, 0, 0), t: V3(0, 0, 0)), lookAt(V3(0.35, 0, 0), target), lookAt(V3(0.7, 0.05, 0.1), target), lookAt(V3(-0.35, -0.05, 0.05), target)]
+    let Ks: [Intrinsics] = [Ktrue, Kb,
+                            Intrinsics(fx: 700, fy: 700, cx: 950, cy: 545, k: [0.02, 0, 0, 0], width: W, height: H),
+                            Intrinsics(fx: 620, fy: 620, cx: 965, cy: 535, k: [-0.03, 0.005, 0, 0], width: W, height: H)]
+    var chainedErr = 0.0, baErr = 0.0, chainedRot = 0.0, baRot = 0.0
+    var lastResult: BAResult?, lastViews: [BAView] = [], lastChained: [Pose6] = []
+    var reduced = 0, trials = 0
+    for _ in 0..<5 {
+        var views: [BAView] = []
+        var guardCount = 0
+        while views.count < 60 && guardCount < 2000 {
+            guardCount += 1
+            let Rb = rodrigues(V3(rng.next() * 0.7 - 0.35, rng.next() * 0.7 - 0.35, rng.next() * 0.7 - 0.35))
+            let centre0 = target + V3(rng.next() * 0.2 - 0.1, rng.next() * 0.16 - 0.08, rng.next() * 0.2 - 0.1)
+            let tb = centre0 - Rb * V3(0.14, 0.1, 0)
+            var obs: [Int: [V2]] = [:]
+            for c in 0..<4 {
+                let w2c = truth[c]
+                let pc = Pose6(r: rodriguesInv(w2c.R * Rb), t: w2c.R * tb + w2c.t)
+                if let v = view(Ks[c], pc, noise: 0.8) { obs[c] = v }
+            }
+            if obs.count >= 2 { views.append(BAView(obs: obs)) }
+        }
+        // chained: 1 from 0, 2 from 1, 3 from 2
+        var chained: [Pose6] = [truth[0]]
+        var ok = true
+        for i in 1..<4 {
+            let j = i - 1
+            let pairs = views.compactMap { v -> ([V2], [V2])? in
+                if let a = v.obs[j], let b = v.obs[i] { return (a, b) } else { return nil }
+            }.prefix(12)
+            guard pairs.count >= 6, let e = calibrateStereo(pairs: Array(pairs), board: board, A: Ks[j], B: Ks[i]) else { ok = false; break }
+            chained.append(compose(e, j == 0 ? nil : chained[j]))
+        }
+        guard ok else { continue }
+        trials += 1
+        guard let r = bundleAdjust(K: Ks, poses: chained, views: views, board: board) else { check(false, "bundleAdjust returned nil"); continue }
+        if r.rmsAfter < r.rmsBefore { reduced += 1 }
+        for i in 1..<4 {
+            chainedErr += length(centre(chained[i]) - centre(truth[i])); baErr += length(centre(r.poses[i]) - centre(truth[i]))
+            chainedRot += length(rodriguesInv(chained[i].R * truth[i].R.transpose)) * 180 / .pi
+            baRot += length(rodriguesInv(r.poses[i].R * truth[i].R.transpose)) * 180 / .pi
+        }
+        lastResult = r; lastViews = views; lastChained = chained
+    }
+    check(trials >= 4, "bundle adjustment: \(trials) of 5 synthetic rigs calibrated")
+    check(reduced == trials, "bundle adjustment lowers the reprojection error in every rig (\(reduced)/\(trials))")
+    check(baErr < chainedErr, String(format: "camera positions: chained %.4f m total, bundle adjusted %.4f m total", chainedErr, baErr))
+    check(baRot < chainedRot, String(format: "camera rotations: chained %.3f deg total, bundle adjusted %.3f deg total", chainedRot, baRot))
+    if let r = lastResult {
+        check(r.rmsAfter < 1.4, "bundle adjusted reprojection error \(r.rmsAfter) px (noise floor about 1.13)")
+        check(r.rmsBefore > r.rmsAfter, "reprojection error \(r.rmsBefore) px with chained poses, \(r.rmsAfter) px after")
+        // intrinsics too: camera 3's focal length starts 2 percent off
+        var Kp = Ks
+        Kp[3] = Intrinsics(fx: Ks[3].fx * 1.02, fy: Ks[3].fy * 1.02, cx: Ks[3].cx, cy: Ks[3].cy, k: Ks[3].k, width: W, height: H)
+        if let r2 = bundleAdjust(K: Kp, poses: lastChained, views: lastViews, board: board, refineIntrinsics: true) {
+            check(r2.rmsAfter < r2.rmsBefore, "with intrinsics: \(r2.rmsBefore) px -> \(r2.rmsAfter) px")
+            check(abs(r2.K[3].fx - Ks[3].fx) < abs(Kp[3].fx - Ks[3].fx), "camera 3 focal length \(r2.K[3].fx) closer to \(Ks[3].fx) than the start \(Kp[3].fx)")
+        } else { check(false, "bundleAdjust with intrinsics returned nil") }
+    }
+}
+
+// 9. the static-picture check (the OBS placeholder logo): no change for 2 s and no person = static; noise, motion or a person = not
+do {
+    var w = StaticWatch()
+    let logo = (0..<1296).map { UInt8(($0 * 37) % 200 + 20) }
+    var verdict = false, t = 0.0
+    while t < 1.9 { verdict = w.add(t: t, sig: logo, person: false); t += 1.0 / 30 }
+    check(!verdict, "a still picture is not yet static before 2 s")
+    while t < 2.4 { verdict = w.add(t: t, sig: logo, person: false); t += 1.0 / 30 }
+    check(verdict, "a picture that never changes is static after 2 s")
+    t += 0.1
+    check(!w.add(t: t, sig: logo, person: true), "a person seen: not static")
+    check(!w.add(t: t + 5, sig: logo, person: false), "a person seen once: never static again")
+    var n = StaticWatch(), nv = false, tt = 0.0
+    while tt < 4 { nv = n.add(t: tt, sig: logo.map { UInt8(max(0, min(255, Int($0) + Int(rng.gauss() * 2)))) }, person: false); tt += 1.0 / 30 }
+    check(!nv, "a noisy real camera is not static")
+    var m = StaticWatch(), mv = false, mt = 0.0
+    while mt < 4 { let shift = Int(mt * 10); mv = m.add(t: mt, sig: logo.map { UInt8(min(255, Int($0) + shift % 40)) }, person: false); mt += 1.0 / 30 }
+    check(!mv, "a changing picture is not static")
+}
+
 // 7. the PDF writes
 do {
     let u = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("skeleton-board-test.pdf")

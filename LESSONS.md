@@ -40,3 +40,7 @@
 7. 16.11.2026: With three or four cameras Vision runs on every second frame (Pipeline.analysisEvery) while the picture is shown at full rate; four live feeds (Sony, FaceTime, two virtual cameras) ran at 21 to 42 fps display and about 65 percent of one core.
 8. 16.11.2026: Text that is drawn into a pane must wrap inside the pane (StageView.wrappedText, infoHeight); half-width panes cut every long sentence otherwise.
 9. 16.11.2026: A source that gives black or no frames gets no tile and is listed as text (RETRY / CONNECT) and is started again by itself every 10 s; its tile returns after half a second of a real picture.
+15. 16.11.2026: a virtual camera's placeholder logo is not black and not missing, it is simply never different: compare a coarse luminance
+    signature over 2 s, and only while no person was ever seen. Real cameras have sensor noise (mean difference above 1 of 255 on the grid).
+16. 16.11.2026: a chain of pair calibrations adds up the error of every link; refine all poses together over every board capture (bundle
+    adjustment) and keep the result only if the reprojection error went down.

@@ -60,3 +60,24 @@ func lumaStats(_ pb: CVPixelBuffer) -> (mean: Double, std: Double) {
     let m = sum / n
     return (m, max(0, sum2 / n - m * m).squareRoot())
 }
+
+/// A 48 x 27 luminance signature of the picture (for the static-picture check: a placeholder logo never changes).
+func lumaSignature(_ pb: CVPixelBuffer) -> [UInt8] {
+    CVPixelBufferLockBaseAddress(pb, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+    guard let base = CVPixelBufferGetBaseAddress(pb) else { return [] }
+    let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb), bpr = CVPixelBufferGetBytesPerRow(pb)
+    guard w >= 48, h >= 27 else { return [] }
+    let p = base.assumingMemoryBound(to: UInt8.self)
+    var out: [UInt8] = []
+    out.reserveCapacity(48 * 27)
+    for gy in 0..<27 {
+        let y = min(h - 1, (gy * h + h / 2) / 27)
+        for gx in 0..<48 {
+            let x = min(w - 1, (gx * w + w / 2) / 48)
+            let o = y * bpr + x * 4
+            out.append(UInt8(min(255.0, 0.114 * Double(p[o]) + 0.587 * Double(p[o + 1]) + 0.299 * Double(p[o + 2]))))
+        }
+    }
+    return out
+}

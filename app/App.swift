@@ -1,12 +1,13 @@
 // App.swift: the app, its window (a standard NSWindow), the one title, the menu.
 import AppKit
 
-let VERSION = 14
+let VERSION = 15
 let APP_NAME = "Skeleton (Mantra)"
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var window: NSWindow!
     var main: MainView!
+    var placedAt = Date()
 
     func applicationDidFinishLaunching(_ n: Notification) {
         buildMenu()
@@ -33,13 +34,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         w.contentView = main
         w.setFrameAutosaveName("SkeletonMain")
-        if UserDefaults.standard.object(forKey: "NSWindow Frame SkeletonMain") == nil { w.center() }
+        placeOnBuiltInScreen(w)
         window = w
         enforceOneTitle()
         w.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         DispatchQueue.main.async { self.enforceOneTitle() }
         Updater.checkAtStart()
+    }
+
+    // MARK: the window opens on the MacBook Pro's own screen (never the BenQ), unless Marko moved it himself
+
+    static func builtInScreen() -> NSScreen? {
+        if let s = NSScreen.screens.first(where: { $0.localizedName.contains("Built-in") }) { return s }
+        return NSScreen.screens.first { s in
+            guard let id = s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID else { return false }
+            return CGDisplayIsBuiltin(id) != 0
+        }
+    }
+
+    /// First launch, or the saved frame is on a screen that is gone or is not the built-in one and Marko did not choose it:
+    /// put the window on the built-in screen. Once he drags it to another screen himself, that choice is kept (frame autosave).
+    func placeOnBuiltInScreen(_ w: NSWindow) {
+        let d = UserDefaults.standard
+        let saved = d.object(forKey: "NSWindow Frame SkeletonMain") != nil
+        guard let builtIn = AppDelegate.builtInScreen() else { if !saved { w.center() }; return }
+        let chosen = d.bool(forKey: "window.screenChosen")
+        let onBuiltIn = w.screen == builtIn
+        if !saved || (!chosen && !onBuiltIn) {
+            let vis = builtIn.visibleFrame
+            var size = saved ? w.frame.size : NSSize(width: 1100, height: 720)
+            size.width = min(size.width, vis.width); size.height = min(size.height, vis.height)
+            w.setFrame(NSRect(x: vis.midX - size.width / 2, y: vis.midY - size.height / 2, width: size.width, height: size.height), display: false)
+        }
+        placedAt = Date()
+    }
+
+    /// A move to another screen later than 3 s after launch is his choice: remembered, never overridden.
+    func windowDidMove(_ n: Notification) {
+        guard let w = window, Date().timeIntervalSince(placedAt) > 3, let b = AppDelegate.builtInScreen() else { return }
+        UserDefaults.standard.set(w.screen != nil && w.screen != b, forKey: "window.screenChosen")
     }
 
     @objc func renderMannequin() { main.renderSelected(last: true) }
