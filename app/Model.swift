@@ -32,6 +32,7 @@ enum Jt: String, CaseIterable {
 struct Pose {
     var j: [Jt: CGPoint] = [:]
     var aspect: CGFloat = 16.0 / 9.0
+    var conf: [Jt: CGFloat] = [:]
     var hipCentre: CGPoint? {
         if let l = j[.leftHip], let r = j[.rightHip] { return CGPoint(x: (l.x + r.x) / 2, y: (l.y + r.y) / 2) }
         return j[.root]

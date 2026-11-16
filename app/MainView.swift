@@ -26,11 +26,48 @@ final class SwitchRow: NSStackView {
     @objc func labelClicked() { isOn.toggle(); onChange?(isOn) }
 }
 
+/// One camera view of the 1 to 3: its pipeline, its stage, its calibration and its recent poses.
+final class Slot {
+    let pipe = Pipeline()
+    let stage = StageView()
+    var device: AVCaptureDevice? { slots[0].device }
+    var intr: Intrinsics?
+    var intrInfo: StoredIntrinsics?
+    var extr: StoredExtrinsics?          // pose relative to camera 1 (nil for camera 1)
+    var offset = 0.0                     // seconds this camera shows a moment later than camera 1
+    var hist: [(t: Double, pose: Pose?, size: CGSize)] = []
+    var size = CGSize.zero
+    var formatText = ""
+    var lastBoard: (t: Double, pts: [V2])?
+    var prevBoard: [V2]?
+    var stable = 0
+    var detectBusy = false
+    var lastDetect = 0.0
+    var sig: [(t: Double, lum: Double, motion: Double)] = []
+    var sizeWarned = false
+    var uid: String { device?.uniqueID ?? "" }
+}
+
+enum CalStep: Equatable { case idle, intrinsics(Int), pair(Int), measure }
+
 final class MainView: NSView, NSMenuDelegate {
     override var isFlipped: Bool { true }
-    let stage = StageView()
+    var slots: [Slot] = [Slot()]
+    var stage: StageView { slots[0].stage }
     let controls = NSView()
-    let camera = CameraController()
+    let camSeg = NSSegmentedControl(labels: ["1 CAMERA", "2 CAMERAS", "3 CAMERAS"], trackingMode: .selectOne, target: nil, action: nil)
+    let camBPopup = NSPopUpButton()
+    let camCPopup = NSPopUpButton()
+    var calStep = CalStep.idle
+    var calViews: [[V2]] = []
+    var calPairs: [([V2], [V2])] = []
+    var lastCap: [V2]?
+    var measureStart = 0.0
+    var lastTri: TriResult?
+    var a3 = false
+    var wizardClear: Date?
+    let calibrateButton = NSButton()
+    let multiRow = NSStackView()
     var devices: [AVCaptureDevice] = []
     var device: AVCaptureDevice?
     let defaults = UserDefaults.standard
@@ -64,12 +101,12 @@ final class MainView: NSView, NSMenuDelegate {
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        addSubview(stage)
+        addSubview(slots[0].stage)
         buildControls()
         addSubview(controls)
         stage.onDropURL = { [weak self] in self?.loadPhoto($0) }
         stage.onAchieved = { [weak self] in self?.achieved() }
-        camera.onFrame = { [weak self] img, size, poses in self?.stage.update(image: img, size: size, poses: poses) }
+        wire(slots[0])
         Voice.shared.onChange = { [weak self] in self?.refreshSettings() }
         builtin = Store.builtin()
         refreshSaved()
@@ -88,7 +125,9 @@ final class MainView: NSView, NSMenuDelegate {
             return e
         }
         checkPermission(request: true)
+        let n0 = max(1, min(3, defaults.integer(forKey: "camcount")))
         reloadDevices()
+        if n0 > 1 { setCameraCount(n0) }
     }
     required init?(coder: NSCoder) { fatalError() }
 
@@ -169,7 +208,24 @@ final class MainView: NSView, NSMenuDelegate {
         setTitle(renderButton, "RENDER MANNEQUIN")
         let rl = NSTextField(labelWithString: "RECORDINGS"); rl.font = MONO; rl.textColor = .white
         let r4 = row([rl, recPopup, renderButton])
-        let col = NSStackView(views: [r0, r1, r2, r3, r4])
+        camSeg.selectedSegment = max(0, min(2, defaults.integer(forKey: "camcount") - 1))
+        camSeg.target = self; camSeg.action = #selector(camCountChanged)
+        camSeg.setAccessibilityLabel("CAMERAS")
+        for p in [camBPopup, camCPopup] {
+            p.widthAnchor.constraint(equalToConstant: 190).isActive = true
+            p.menu?.delegate = self
+        }
+        camBPopup.target = self; camBPopup.action = #selector(camBChosen); camBPopup.setAccessibilityLabel("CAMERA 2")
+        camCPopup.target = self; camCPopup.action = #selector(camCChosen); camCPopup.setAccessibilityLabel("CAMERA 3")
+        let r5 = row([camSeg, camBPopup, camCPopup])
+        calibrateButton.isBordered = false; calibrateButton.target = self; calibrateButton.action = #selector(calibratePressed)
+        setTitle(calibrateButton, "CALIBRATE")
+        a3 = defaults.bool(forKey: "boardA3")
+        let r6 = row([calibrateButton, button("BOARD A4", #selector(boardA4)), button("BOARD A3", #selector(boardA3)), button("MEASURE DELAY", #selector(measureDelay))])
+        multiRow.setViews([r6], in: .leading)
+        multiRow.orientation = .vertical
+        multiRow.isHidden = true
+        let col = NSStackView(views: [r0, r1, r2, r3, r4, r5, multiRow])
         col.orientation = .vertical; col.alignment = .leading; col.spacing = 8
         col.edgeInsets = NSEdgeInsets(top: 8, left: 14, bottom: 10, right: 14)
         col.translatesAutoresizingMaskIntoConstraints = false
@@ -183,8 +239,8 @@ final class MainView: NSView, NSMenuDelegate {
         let vc = NSViewController()
         settingsText.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         settingsText.preferredMaxLayoutWidth = 420
-        let box = NSView(frame: NSRect(x: 0, y: 0, width: 450, height: 190))
-        settingsText.frame = NSRect(x: 15, y: 10, width: 420, height: 170)
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: 450, height: 330))
+        settingsText.frame = NSRect(x: 15, y: 10, width: 420, height: 310)
         box.addSubview(settingsText)
         vc.view = box
         settingsPopover.contentViewController = vc
@@ -197,7 +253,8 @@ final class MainView: NSView, NSMenuDelegate {
 
     override func layout() {
         super.layout()
-        stage.frame = bounds
+        let n = CGFloat(slots.count), w = bounds.width / n
+        for (i, s) in slots.enumerated() { s.stage.frame = NSRect(x: CGFloat(i) * w, y: 0, width: w, height: bounds.height) }
         let h = max(60, controls.fittingSize.height)
         controls.frame = NSRect(x: 0, y: 0, width: bounds.width, height: h)
     }
@@ -247,16 +304,18 @@ final class MainView: NSView, NSMenuDelegate {
     @objc func toggleRecord() {
         if let _ = recorder { stopRecording(); return }
         guard stage.image != nil else { stage.toast("NO CAMERA PICTURE YET"); return }
-        let r = Recorder(camera: stage.cameraName, mirror: stage.mirror)
+        let r = Recorder(camera: slots.map { $0.stage.cameraName }.joined(separator: " + "), mirror: stage.mirror)
+        if slots.count > 1 { r.cameras = camerasHeader(); r.source = calibrated ? "triangulated" : "vision3d" }
         recorder = r
-        camera.setRecorder(r)
+        slots[0].pipe.want3D = true
         stage.recText = "00:00"
         setRecordTitle("STOP 00:00")
     }
 
     func stopRecording() {
         guard recorder != nil else { return }
-        let r = camera.takeRecorder() ?? recorder
+        let r = recorder
+        slots[0].pipe.want3D = false
         recorder = nil
         stage.recText = nil
         setRecordTitle("RECORD")
@@ -361,39 +420,67 @@ final class MainView: NSView, NSMenuDelegate {
     @objc func devicesChanged() { DispatchQueue.main.async { self.reloadDevices() } }
 
     func reloadDevices() {
-        devices = CameraController.devices()
-        cameraPopup.removeAllItems()
-        for d in devices { cameraPopup.addItem(withTitle: d.localizedName) }
+        devices = AVCameraSource.devices()
+        for p in [cameraPopup, camBPopup, camCPopup] {
+            p.removeAllItems()
+            for d in devices { p.addItem(withTitle: d.localizedName) }
+        }
         if devices.isEmpty { cameraPopup.addItem(withTitle: "NO CAMERA"); stage.cameraName = ""; return }
-        var pick: AVCaptureDevice?
-        if let name = pendingCamera?.lowercased() {
-            pick = devices.first { $0.localizedName.lowercased().contains(name) || $0.uniqueID.lowercased() == name }
+        var taken: [String] = []
+        for k in 0..<slots.count {
+            var pick: AVCaptureDevice?
+            if k == 0, let name = pendingCamera?.lowercased() {
+                pick = devices.first { $0.localizedName.lowercased().contains(name) || $0.uniqueID.lowercased() == name }
+            }
+            if pick == nil, let cur = slots[k].device { pick = devices.first { $0.uniqueID == cur.uniqueID && !taken.contains($0.uniqueID) } }
+            if pick == nil, let id = defaults.string(forKey: k == 0 ? "camera" : "camera\(k)") { pick = devices.first { $0.uniqueID == id && !taken.contains($0.uniqueID) } }
+            if pick == nil { pick = devices.first { !taken.contains($0.uniqueID) } }
+            guard let p = pick else { continue }
+            taken.append(p.uniqueID)
+            let popup = [cameraPopup, camBPopup, camCPopup][k]
+            if let i = devices.firstIndex(where: { $0.uniqueID == p.uniqueID }) { popup.selectItem(at: i) }
+            let changed = slots[k].device?.uniqueID != p.uniqueID
+            if changed || (k == 0 && pendingCamera != nil) { select(p, slot: k) }
         }
-        if pick == nil, let cur = device { pick = devices.first { $0.uniqueID == cur.uniqueID } }
-        if pick == nil, let id = defaults.string(forKey: "camera") { pick = devices.first { $0.uniqueID == id } }
-        if pick == nil { pick = devices.first }
-        if let p = pick {
-            let changed = device?.uniqueID != p.uniqueID
-            if let i = devices.firstIndex(where: { $0.uniqueID == p.uniqueID }) { cameraPopup.selectItem(at: i) }
-            if changed || pendingCamera != nil { select(p) }
-            pendingCamera = nil
+        pendingCamera = nil
+    }
+
+    @objc func cameraChosen() { chooseCamera(0, cameraPopup) }
+    @objc func camBChosen() { chooseCamera(1, camBPopup) }
+    @objc func camCChosen() { chooseCamera(2, camCPopup) }
+
+    func chooseCamera(_ k: Int, _ popup: NSPopUpButton) {
+        let i = popup.indexOfSelectedItem
+        guard i >= 0, i < devices.count, k < slots.count else { return }
+        select(devices[i], slot: k)
+    }
+
+    func wire(_ s: Slot) {
+        s.pipe.onFrame = { [weak self, weak s] f in
+            guard let self = self, let s = s else { return }
+            self.frame(s, f)
         }
     }
 
-    @objc func cameraChosen() {
-        let i = cameraPopup.indexOfSelectedItem
-        guard i >= 0, i < devices.count else { return }
-        select(devices[i])
-    }
-
-    func select(_ d: AVCaptureDevice) {
-        device = d
-        defaults.set(d.uniqueID, forKey: "camera")
+    func select(_ d: AVCaptureDevice, slot k: Int) {
+        let s = slots[k]
+        s.device = d
+        defaults.set(d.uniqueID, forKey: k == 0 ? "camera" : "camera\(k)")
         let m = defaults.object(forKey: "mirror." + d.uniqueID) as? Bool ?? d.localizedName.contains("FaceTime")
-        mirrorSw.isOn = m; stage.mirror = m
-        stage.cameraName = d.localizedName
+        s.stage.mirror = m
+        if k == 0 { mirrorSw.isOn = m }
+        s.stage.cameraName = d.localizedName
+        s.size = .zero; s.hist = []; s.sizeWarned = false
+        loadCalibration(s)
         guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else { return }
-        camera.start(d) { [weak self] in self?.refreshSettings() }
+        let src = AVCameraSource(device: d)
+        s.pipe.attach(src)
+        src.start { [weak self, weak s] ok in
+            guard let self = self, let s = s else { return }
+            s.formatText = src.formatText
+            if !ok { s.stage.toast("THE CAMERA DID NOT START") }
+            self.refreshSettings()
+        }
     }
 
     // MARK: target pose
@@ -524,11 +611,12 @@ final class MainView: NSView, NSMenuDelegate {
     func refreshSettings() {
         settingsText.stringValue = """
         SKELETON (MANTRA) v\(VERSION)
-        CAMERA: \(stage.cameraName.isEmpty ? "none" : stage.cameraName) \(camera.formatText)
+        CAMERA: \(stage.cameraName.isEmpty ? "none" : stage.cameraName) \(slots[0].formatText)
         LEVEL: \(stage.level.title)  green \(Int(stage.level.green))°, yellow \(Int(stage.level.yellow))°, hold \(Int(stage.level.hold)) s
         VOICE LAST USED: \(Voice.shared.lastUsed)
         VOICE IF THE MANTRA VOICE IS DOWN: \(Voice.shared.fallbackName)
         POSES FOLDER: \(Store.dir.path)
+        \(multiSettings())
         """
     }
 }

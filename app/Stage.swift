@@ -18,6 +18,11 @@ final class StageView: NSView {
     var skeletonOnly = false
     var cameraName = ""
     var recText: String?
+    var isSecondary = false              // the other cameras of the multi-camera mode: picture and skeleton only
+    var wizard: String?                  // calibration instructions
+    var calibPoints: [V2]?               // the board points found in the picture, pixels
+    var extraInfo: String?               // e.g. SYNC +180 MS
+    var quality: Int?                    // tracking quality 0...100 (multi-camera)
     var fps = 0
     var band: (title: String, text: String)?
     var onAchieved: (() -> Void)?
@@ -53,14 +58,14 @@ final class StageView: NSView {
 
     func resetHold() { greenSince = nil; matched = false; fired = false }
 
-    func update(image: CGImage, size: CGSize, poses: [Pose]) {
+    func update(image: CGImage, size: CGSize, poses: [Pose], frontal: Pose? = nil) {
         self.image = image; imgSize = size; people = poses
         primary = poses.indices.max { (poses[$0].torso ?? 0) < (poses[$1].torso ?? 0) }
         let aspect = size.width / max(1, size.height)
-        if let t = target?.pose {
+        if let t = target?.pose, !isSecondary {
             let user = primary.map { poses[$0] }
             ghost = place(t, onto: user, aspect: aspect)
-            if let u = user { comparison = compare(user: u, target: t, level: level) } else { comparison = nil }
+            if let u = frontal ?? user { comparison = compare(user: u, target: t, level: level) } else { comparison = nil }
         } else { ghost = nil; comparison = nil }
         if let c = comparison, c.worst <= level.green {
             if greenSince == nil { greenSince = Date() }
@@ -112,11 +117,16 @@ final class StageView: NSView {
             ctx.draw(img, in: CGRect(x: 0, y: 0, width: rect.width, height: rect.height))
             ctx.restoreGState()
         }
-        if let g = ghost { drawGhost(g, aspect, rect, ctx) }
+        if let g = ghost, !isSecondary { drawGhost(g, aspect, rect, ctx) }
         for (i, p) in people.enumerated() { drawPerson(p, aspect, rect, ctx, isPrimary: i == primary) }
+        drawCalib(rect, ctx)
         drawInfo(area, rect)
-        drawRing(area)
-        drawBand()
+        if !isSecondary { drawRing(area); drawBand() }
+        if let w = wizard { text(w, at: CGPoint(x: area.midX, y: area.maxY - 100), size: 13, color: .white, center: true, back: true) }
+        if let q = quality {
+            let c: NSColor = q >= 75 ? StageView.green : (q >= 45 ? StageView.yellow : StageView.red)
+            text("TRACKING QUALITY \(q)", at: CGPoint(x: 14, y: area.maxY - 44), size: 11, color: c, center: false, back: true)
+        }
         if let r = recText {
             text("● REC  " + r, at: CGPoint(x: area.midX, y: area.maxY - 60), size: 16, color: StageView.red, center: true, back: true)
         }
@@ -126,7 +136,7 @@ final class StageView: NSView {
         if people.isEmpty {
             text("NO PERSON SEEN", at: CGPoint(x: area.midX, y: area.maxY - 60), size: 12, color: .white.withAlphaComponent(0.7), center: true, back: true)
         }
-        if target == nil {
+        if target == nil && !isSecondary {
             text("LOAD A POSE PHOTO (OR DROP ONE HERE), OR FREEZE YOUR POSE, OR START A SESSION", at: CGPoint(x: area.midX, y: area.maxY - 28),
                  size: 12, color: .white.withAlphaComponent(0.7), center: true, back: true)
         }
@@ -181,9 +191,21 @@ final class StageView: NSView {
         }
     }
 
+    private func drawCalib(_ rect: CGRect, _ ctx: CGContext) {
+        guard let pts = calibPoints, imgSize.width > 0 else { return }
+        ctx.setFillColor(StageView.green.withAlphaComponent(0.9).cgColor)
+        for p in pts {
+            var nx = CGFloat(p.x) / imgSize.width
+            if mirror { nx = 1 - nx }
+            let v = CGPoint(x: rect.minX + nx * rect.width, y: rect.minY + CGFloat(p.y) / imgSize.height * rect.height)
+            ctx.fillEllipse(in: CGRect(x: v.x - 4, y: v.y - 4, width: 8, height: 8))
+        }
+    }
+
     private func drawInfo(_ area: CGRect, _ rect: CGRect) {
-        let info = "\(cameraName.isEmpty ? "NO CAMERA" : cameraName)  ·  \(fps) fps"
+        let info = "\(cameraName.isEmpty ? "NO CAMERA" : cameraName)  ·  \(fps) fps" + (extraInfo.map { "  ·  " + $0 } ?? "")
         text(info, at: CGPoint(x: 14, y: area.maxY - 22), size: 11, color: .white.withAlphaComponent(0.7), center: false)
+        if isSecondary { return }
         if let t = target, let th = t.thumb {
             let w: CGFloat = 110, h = w * CGFloat(th.height) / CGFloat(th.width)
             let r = CGRect(x: 14, y: area.maxY - 34 - h, width: w, height: h)

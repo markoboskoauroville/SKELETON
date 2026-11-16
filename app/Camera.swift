@@ -1,7 +1,7 @@
-// Camera.swift: any camera (built-in, USB/UVC like the Sony ILCE-7M5, Continuity, virtual) -> frames + Vision body poses.
+// Camera.swift: AVFoundation camera as a FrameSource (Source.swift), and the Pipeline that turns any FrameSource into
+// Frames: the picture, Vision 2D poses (and 3D while recording), light smoothing.
 import AVFoundation
 import Vision
-import VideoToolbox
 import CoreImage
 
 final class Tracker {
@@ -22,6 +22,7 @@ final class Tracker {
             if best >= 0 && bd < 0.35 {
                 used.insert(best)
                 var sm = Pose(aspect: p.aspect)
+                sm.conf = p.conf
                 for (k, v) in p.j {
                     if let o = tracks[best].pose.j[k] { sm.j[k] = CGPoint(x: (o.x + v.x) / 2, y: (o.y + v.y) / 2) } else { sm.j[k] = v }
                 }
@@ -40,6 +41,7 @@ func extractPoses(_ results: [VNHumanBodyPoseObservation], aspect: CGFloat) -> [
         for jt in Jt.allCases {
             if let pt = try? o.recognizedPoint(jt.vn), pt.confidence >= 0.3 {
                 p.j[jt] = CGPoint(x: pt.location.x * aspect, y: 1 - pt.location.y)
+                p.conf[jt] = CGFloat(pt.confidence)
             }
         }
         if p.j.count >= 4 { out.append(p) }
@@ -47,20 +49,38 @@ func extractPoses(_ results: [VNHumanBodyPoseObservation], aspect: CGFloat) -> [
     return out
 }
 
-final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
-    var onFrame: ((CGImage, CGSize, [Pose]) -> Void)?
+/// One processed frame.
+struct Frame {
+    var image: CGImage
+    var size: CGSize
+    var poses: [Pose]        // smoothed
+    var raw: [Pose]          // as Vision gave them (for the recording)
+    var t: Double            // host clock seconds
+    var lum: Double
+    var v3: V3Obs?
+}
+
+/// An AVFoundation camera: built-in, USB/UVC (Sony ILCE-7M5), Continuity, Iriun, OBS/NDI virtual cameras.
+final class AVCameraSource: NSObject, FrameSource, AVCaptureVideoDataOutputSampleBufferDelegate {
+    let device: AVCaptureDevice
+    var name: String { device.localizedName }
+    var uniqueID: String { device.uniqueID }
+    var intrinsics: Intrinsics? { nil }
+    private(set) var formatText = ""
+    var clockNote: String { "AVCapture host clock" }
+    var onPixelBuffer: ((CVPixelBuffer, Double) -> Void)?
     private let session = AVCaptureSession()
     private let output = AVCaptureVideoDataOutput()
     private let videoQ = DispatchQueue(label: "skeleton.video")
     private let sessionQ = DispatchQueue(label: "skeleton.session")
-    private let tracker = Tracker()
-    private(set) var formatText = ""
-    private var current: AVCaptureDevice?
-    private var recorder: Recorder?
-    private let recLock = NSLock()
-    func setRecorder(_ r: Recorder?) { recLock.lock(); recorder = r; recLock.unlock() }
-    func takeRecorder() -> Recorder? { recLock.lock(); defer { recLock.unlock() }; let r = recorder; recorder = nil; return r }
-    private func currentRecorder() -> Recorder? { recLock.lock(); defer { recLock.unlock() }; return recorder }
+
+    init(device: AVCaptureDevice) {
+        self.device = device
+        super.init()
+        output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+        output.alwaysDiscardsLateVideoFrames = true
+        output.setSampleBufferDelegate(self, queue: videoQ)
+    }
 
     static func devices() -> [AVCaptureDevice] {
         let types: [AVCaptureDevice.DeviceType] = [.builtInWideAngleCamera, .external, .continuityCamera]
@@ -69,32 +89,27 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         return all
     }
 
-    override init() {
-        super.init()
-        output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
-        output.alwaysDiscardsLateVideoFrames = true
-        output.setSampleBufferDelegate(self, queue: videoQ)
-    }
-
-    func start(_ device: AVCaptureDevice, done: @escaping () -> Void) {
+    func start(completion: @escaping (Bool) -> Void) {
         sessionQ.async {
-            if self.session.isRunning { self.session.stopRunning() }
             self.session.beginConfiguration()
             for i in self.session.inputs { self.session.removeInput(i) }
             if !self.session.outputs.contains(self.output), self.session.canAddOutput(self.output) { self.session.addOutput(self.output) }
-            if let input = try? AVCaptureDeviceInput(device: device), self.session.canAddInput(input) { self.session.addInput(input) }
+            var ok = false
+            if let input = try? AVCaptureDeviceInput(device: self.device), self.session.canAddInput(input) { self.session.addInput(input); ok = true }
             self.session.commitConfiguration()
-            self.pickFormat(device)
-            self.current = device
-            self.session.startRunning()
-            DispatchQueue.main.async(execute: done)
+            if ok { self.pickFormat(); self.session.startRunning() }
+            DispatchQueue.main.async { completion(ok) }
         }
     }
 
-    func stop() { sessionQ.async { if self.session.isRunning { self.session.stopRunning() } } }
+    func stop() {
+        onPixelBuffer = nil
+        sessionQ.async { if self.session.isRunning { self.session.stopRunning() } }
+    }
 
     /// Best format: 1920x1080 at 30 fps, else 1280x720, else what the camera gives.
-    private func pickFormat(_ d: AVCaptureDevice) {
+    private func pickFormat() {
+        let d = device
         var best: (AVCaptureDevice.Format, Int)?
         for f in d.formats {
             let dim = CMVideoFormatDescriptionGetDimensions(f.formatDescription)
@@ -118,24 +133,53 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        var cg: CGImage?
-        VTCreateCGImageFromCVPixelBuffer(pb, options: nil, imageOut: &cg)
-        guard let img = cg else { return }
+        onPixelBuffer?(pb, CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds)
+    }
+}
+
+/// Turns the frames of any FrameSource into Frames (Vision 2D, optional 3D). Late frames are dropped, never queued.
+final class Pipeline {
+    var onFrame: ((Frame) -> Void)?
+    var want3D = false
+    private(set) var source: FrameSource?
+    private let tracker = Tracker()
+    private let q = DispatchQueue(label: "skeleton.pipeline")
+    private let lock = NSLock()
+    private var busy = false
+
+    func attach(_ s: FrameSource) {
+        detach()
+        source = s
+        s.onPixelBuffer = { [weak self] pb, t in self?.handle(pb, t) }
+    }
+
+    func detach() { source?.stop(); source = nil }
+
+    private func handle(_ pb: CVPixelBuffer, _ t: Double) {
+        lock.lock()
+        if busy { lock.unlock(); return }
+        busy = true
+        lock.unlock()
+        q.async {
+            self.process(pb, t)
+            self.lock.lock(); self.busy = false; self.lock.unlock()
+        }
+    }
+
+    private func process(_ pb: CVPixelBuffer, _ t: Double) {
+        guard let img = cgImage(from: pb) else { return }
         let w = CGFloat(CVPixelBufferGetWidth(pb)), h = CGFloat(CVPixelBufferGetHeight(pb))
         let req = VNDetectHumanBodyPoseRequest()
-        let handler = VNImageRequestHandler(cvPixelBuffer: pb, orientation: .up, options: [:])
         var reqs: [VNRequest] = [req]
         var req3: VNDetectHumanBodyPose3DRequest?
-        let rec = currentRecorder()
-        if rec != nil { let r = VNDetectHumanBodyPose3DRequest(); req3 = r; reqs.append(r) }
-        try? handler.perform(reqs)
-        if let rec = rec {
-            rec.add(time: CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds, obs2d: req.results ?? [],
-                    obs3d: req3?.results?.first, w: Int(w), h: Int(h))
-        }
-        let poses = tracker.update(extractPoses(req.results ?? [], aspect: w / h))
+        if want3D { let r = VNDetectHumanBodyPose3DRequest(); req3 = r; reqs.append(r) }
+        try? VNImageRequestHandler(cvPixelBuffer: pb, orientation: .up, options: [:]).perform(reqs)
+        let raw = extractPoses(req.results ?? [], aspect: w / h)
+        let poses = tracker.update(raw)
+        let v3 = req3?.results?.first.map { extract3D($0) }
+        let f = Frame(image: img, size: CGSize(width: w, height: h), poses: poses, raw: raw, t: t, lum: meanLuminance(pb), v3: v3)
         let cb = onFrame
-        DispatchQueue.main.async { cb?(img, CGSize(width: w, height: h), poses) }
+        DispatchQueue.main.async { cb?(f) }
     }
 }
 
