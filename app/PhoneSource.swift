@@ -260,13 +260,20 @@ final class PhoneSource: FrameSource {
         } else {
             overUSB = false; linkPort = 48100; statusPort = 48102
             if let a = adbSerial { serial = a }
-            // the camera must answer before its addresses can be measured: started if none answers yet
+            // the camera must answer before its addresses can be measured: started (through adb, only when it is not
+            // already in SKELETON mode: every start reopens the lens) if none answers yet
             var best = bestAddress()
             if best == nil, let a = adbSerial {
-                startCamera(a, mbps: options.mbpsWifi)
-                let deadline = Date().addingTimeInterval(12)
+                if PhoneAdb.statusViaAdb(a)?["mode"] as? String != "skeleton" { startCamera(a, mbps: options.mbpsWifi) }
+                let deadline = Date().addingTimeInterval(8)
                 while best == nil && Date() < deadline && !stopped { Thread.sleep(forTimeInterval: 0.5); best = bestAddress() }
             }
+            // the last way: adb's own tunnel (slower, but it always reaches a phone adb reaches; a Mac firewall such as
+            // Little Snitch that holds the app's network connections does not hold 127.0.0.1)
+            if best == nil, let a = adbSerial, let lp = PhoneAdb.forward(a, remote: 48100), let sp = PhoneAdb.forward(a, remote: 48102) {
+                host = "127.0.0.1"; linkPort = lp; statusPort = sp; route = "adb tunnel"
+                PhoneLog.line("\(phone.label): its addresses did not answer the app (\(knownAddrs.map { $0.ip }.joined(separator: ", "))): adb tunnel")
+            } else {
             guard let b = best else {
                 return adbSerial == nil ? "NOT ON ADB AND NOT REACHABLE" : "NOT REACHABLE OVER THE NETWORK (\(knownAddrs.map { $0.ip }.joined(separator: ", ")))"
             }
@@ -274,6 +281,7 @@ final class PhoneSource: FrameSource {
             route = b.iface.hasPrefix("wlan") ? "Wi-Fi" : (b.iface.hasPrefix("tun") || b.ip.hasPrefix("100.")) ? "Tailscale"
                 : (b.iface.hasPrefix("rndis") || b.iface.hasPrefix("ncm") || b.iface.hasPrefix("usb")) ? "USB network" : "network"
             NSLog("[Skeleton] phone %@: %@ via %@ (%@, %.0f ms)", phone.label, route, host, b.iface, b.rtt * 1000)
+            }
         }
         // SKELETON mode at the bit rate this route carries (the tethered USB network carries what the cable does)
         let want = overUSB || route == "USB network" ? options.mbps : options.mbpsWifi
@@ -457,7 +465,7 @@ final class PhoneSource: FrameSource {
         DispatchQueue.global().async {
             // the camera back to its own settings (Marko's), the forwards removed
             PhoneAdb.run(["-s", s, "shell", "am", "start", "-n", Self.activity, "--es", "mode", "off"])
-            if usb && lp > 0 { PhoneAdb.run(["-s", s, "forward", "--remove", "tcp:\(lp)"]); PhoneAdb.run(["-s", s, "forward", "--remove", "tcp:\(sp)"]) }
+            if (usb || lp != 48100) && lp > 0 { PhoneAdb.run(["-s", s, "forward", "--remove", "tcp:\(lp)"]); PhoneAdb.run(["-s", s, "forward", "--remove", "tcp:\(sp)"]) }
         }
     }
 }
@@ -703,6 +711,21 @@ enum PhoneAdb {
             let pa = a.model.lowercased().contains("pixel"), pb = b.model.lowercased().contains("pixel")
             return pa != pb ? pa : a.label < b.label
         }
+    }
+
+    /// The camera's status read through adb's own tunnel (a forward made and removed), or nil.
+    static func statusViaAdb(_ serial: String) -> [String: Any]? {
+        guard let p = forward(serial, remote: 48102) else { return nil }
+        defer { run(["-s", serial, "forward", "--remove", "tcp:\(p)"]) }
+        guard let url = URL(string: "http://127.0.0.1:\(p)/status") else { return nil }
+        var req = URLRequest(url: url); req.timeoutInterval = 3
+        let sem = DispatchSemaphore(value: 0); var out: [String: Any]?
+        URLSession.shared.dataTask(with: req) { d, _, _ in
+            if let d = d { out = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] }
+            sem.signal()
+        }.resume()
+        _ = sem.wait(timeout: .now() + 3.5)
+        return out
     }
 
     /// `adb forward tcp:0 tcp:<remote>`: a free local port, chosen by adb (several phones at once never collide).
