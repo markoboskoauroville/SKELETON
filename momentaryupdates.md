@@ -9,3 +9,10 @@
 **16.11.2026:** "It needs to have record button. So it records the whole movement of the skeleton in one file. And then you need to build in my blender, it's installed here, a mannequin ... after recording I can say there is a command in my app render mannequin and then mannequin is getting animated and rendered on my desktop doing the same movement as I was doing"
 
 **16.11.2026:** "Yes, Sony and phone through Iriun or two phones or any combination."
+
+
+## 16.11.2026, Manual Camera as the Skeleton camera over USB (Marko, word for word)
+
+"I have much better protocol than IRIUN, it has much better picture quality. And this we need to use our Mantra manual camera for this and it needs to be also compatible with the software for poses. So if I connect via USB my Pixel phone, this app needs to understand how to adjust the phone and the camera to get the best possible picture available on this USB connection. and since my camera is on ADB, my application is to understand ADB and start the camera itself, adjust the settings of this phone and being able to use it for posing."
+
+**Plan:** Manual Camera gets an adb-started SKELETON mode (intent extras: lens, size, fps, bitrate; 50 Hz anti-flicker, stabilisation off, lens intrinsics in a JSON status) that serves H.264 on a TCP port the Mac reaches by adb forward; Skeleton (Mantra) gets the source "Manual Camera (Pixel, USB)" which starts it, decodes with VideoToolbox and feeds the pose pipeline.
