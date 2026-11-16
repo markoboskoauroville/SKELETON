@@ -16,3 +16,13 @@
    frame (the rim light sits high, 5.5 m).
 9. Only bone directions come from Vision; lengths stay the mannequin's. Limbs: smallest swing from the parent-carried rest
    (no twist flips); torso: twist from the hip and shoulder lines.
+10. 16.11.2026 (cleanup): Vision p3 is root-relative and 2D shows no depth. Foot locking in the world needs the root's travel:
+    x/y come from the 2D root track (metres per pixel from segments seen in both), z only from the planted feet. Locking z
+    without it pinned a planted foot against a root that really moved and bent the legs (6.6 mm added error on clean data).
+11. Order matters: swaps before any filter (a smeared swap pulls the hips into the root), wrong bends rebuilt on the raw
+    track before the filter (smoothed, a 6-frame backward knee becomes a long wrong stretch), holds and rekey before the
+    foot lock (anything after the lock breaks the plants).
+12. A Claude answer that smoothed across a left/right swap was rejected by the importer's bone check: the check is what
+    makes the LLM route safe. Prompts must tell Claude to fix listed swaps first.
+13. scribe `--out` takes a FOLDER (it wrote docs/reference/<id>.md/<id>.md and another worker's commit picked it up);
+    give it a directory and rename afterwards.

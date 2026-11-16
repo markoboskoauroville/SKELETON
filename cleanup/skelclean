@@ -1,0 +1,3 @@
+#!/bin/sh
+# skelclean: the Skeleton (Mantra) cleanup engine (cleanup/skelclean.py)
+exec python3 "$(dirname "$0")/skelclean.py" "$@"

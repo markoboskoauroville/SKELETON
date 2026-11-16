@@ -63,3 +63,56 @@ The app runs it with nice -n 19.
 Note on blender/sample.skel.json (16.11.2026): its p2 puts the subject's left on the image LEFT while its p3 says he faces the
 camera, so the renderer reads it as "back to the camera" and shows the mannequin from behind (still the same arm on the same side
 of the picture). Real recordings from the camera are consistent; synthetic.skel.json is the reference test.
+
+## Cleanup (cleanup/, 16.11.2026)
+
+Marko, 16.11.2026: "develop a model for cleaning up the movement, so there are no shaking. They need to follow kinetic
+algorithms ... and also a file format which I can upload to Claude AI and then it can clean up automatically or by the
+prompt." Role model: the video 3OauN3AiTBw (QuickMagic capture + Cascadeur cleanup), docs/reference/cleanup-role-model.md.
+
+Local engine, Python 3 + numpy (scipy used when present; both were already installed: numpy 1.24.3, scipy 1.11.4; no venv,
+nothing pip-installed). `cleanup/skelclean in.skel.json -o out.skel.json --preset gentle|standard|strong|yoga-hold|dance --report`
+(`--skip step`, `--only step`, `--set step.key=value`, `--print-params`). Steps in the order they run:
+swaps (left/right label swaps by continuity, FIRST because the filter would smear them) > outliers (Hampel, bone-length
+outliers, impossible speeds, optional 2D confidence) > gaps (PCHIP up to 15 frames; longer gaps keep the data) > limits on the
+raw track (a short wrong knee/elbow bend is rebuilt before the filter smears it) > One Euro (vector, speed adaptive, forward +
+backward = no lag) > Savitzky-Golay (optional) > bones (median length per bone, left/right averaged, children re-projected
+root outward) > limits again (knee/elbow hinge: no hyperextension past 8/12 deg, no over-flexion; hinge axis from the frames
+clearly bent) > holds (yoga-hold: still stretches frozen, blended) > rekey (strong: key poses by RDP, in-betweens regenerated,
+the Cascadeur idea) > feet (floor, contacts = ankle low + still N frames, lock with two-bone leg IK, blended; with a 2D track
+the root travel is estimated: x/y from p2 in metres, z from the planted feet; frames[].rw is written) > root (speed and
+acceleration limits, no teleports) > bones again. Output: same format, plus "cleanup" metadata; r3 is dropped (no longer
+matches). Files: skelcore.py (load/save, hierarchy, metrics), skelclean.py, skelanalyze.py, synth.py (test motion with truth).
+
+Measured on the synthetic test (cleanup/synth.py: 10 s, 30 fps, squat, step, arm wave, arms-overhead hold; noise 1.2 cm +
+1 % scale wobble, 6 spikes of 25 cm, a 6-frame wrist gap, a frame without 3D, a 5-frame leg swap, a knee bent 20 deg
+backwards). Error vs truth (mean joint error), jitter (mean joint acceleration; the true motion has 0.87 m/s^2), bone
+length spread, foot sliding during the true contacts, and the error the preset adds to the CLEAN motion:
+
+| | error mm | jitter m/s^2 | bone std cm | foot slide cm | clean motion distorted mm |
+|---|---|---|---|---|---|
+| noisy input | 20.5 | 45.9 | 1.60 | 1330 | |
+| gentle | 9.6 | 13.1 | 0.00 | 29.4 | 1.2 |
+| standard | 7.3 | 7.8 | 0.00 | 6.7 | 1.6 |
+| strong | 5.7 | 0.9 | 0.00 | 3.0 | 2.6 |
+| yoga-hold | 5.4 | 3.7 | 0.00 | 5.6 | 2.4 (hold: under 1 mm/frame) |
+| dance | 8.9 | 11.4 | 0.00 | 18.7 | 1.3 |
+| Claude, prompt 2 (shaking only) | 7.4 | 8.3 | 0.61 | (feet not in scope) | |
+| Claude, prompt 6 + its suggested ops | 6.7 | 6.6 | 0.00 | | |
+
+Every preset: the swap fixed (all 5 frames), the backward knee rebuilt (ankle within 3 cm of the truth), the gap and the
+empty frame filled. Tests: `python3 -m unittest discover -s cleanup/tests` (18 tests, about 6 s).
+
+Claude round trip: `cleanup/export_for_claude.py rec.skel.json` > rec.skelclaude.md (header, bone table, metrics, flagged
+frames, output contract, CSV per joint in mm; 10 s = 80 kB; a 30 s clip goes to every 2nd frame + flagged frames, under 200
+kB) > upload with a prompt from docs/cleanup-prompts.md > save the answer > `cleanup/import_from_claude.py rec.skel.json answer.md
+-o rec.claude.skel.json` (checks fingerprint, joints, ranges, bone lengths, speeds; REJECTED = exit 2, nothing written;
+`--repair`, `--force`, `--apply-suggestions` for analysis answers). Format: docs/claude-cleanup-format.md. Prompts 2 and 6
+were acted out by Claude on the synthetic clip; the answers are cleanup/tests/data/ and replayed by the tests. The first
+answer to prompt 2 smoothed across the leg swap and the importer REJECTED it (hips pulled to 3 cm): prompt 2 now fixes
+listed swaps first.
+
+App hook (for the app worker, not built into the app by this worker): a CLEAN button before RENDER MANNEQUIN runs
+`/usr/bin/python3 <repo>/cleanup/skelclean.py <rec>.skel.json -o <rec>.clean.skel.json --preset <preset> --report`
+(exit 0 = ok; stdout has a one-line summary; the report is <rec>.clean.report.md) and then renders <rec>.clean.skel.json.
+Presets for a picker: gentle, standard (default), strong, yoga-hold, dance. Runs in about 1.3 s for a 30 s clip (M1 Pro).
