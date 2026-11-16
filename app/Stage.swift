@@ -17,6 +17,7 @@ final class StageView: NSView {
     var showAngles = false
     var skeletonOnly = false
     var cameraName = ""
+    var recText: String?
     var fps = 0
     var band: (title: String, text: String)?
     var onAchieved: (() -> Void)?
@@ -116,6 +117,9 @@ final class StageView: NSView {
         drawInfo(area, rect)
         drawRing(area)
         drawBand()
+        if let r = recText {
+            text("● REC  " + r, at: CGPoint(x: area.midX, y: area.maxY - 60), size: 16, color: StageView.red, center: true, back: true)
+        }
         if let t = toastText, Date() < toastUntil {
             text(t, at: CGPoint(x: area.midX, y: area.minY + 150), size: 14, color: .white, center: true, back: true)
         }

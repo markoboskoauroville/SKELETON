@@ -1,7 +1,7 @@
 // App.swift: the app, its window (a standard NSWindow), the one title, the menu.
 import AppKit
 
-let VERSION = 1
+let VERSION = 2
 let APP_NAME = "Skeleton (Mantra)"
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
@@ -34,10 +34,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Updater.checkAtStart()
     }
 
+    @objc func renderMannequin() { main.renderSelected(last: true) }
+
     func buildMenu() {
         let bar = NSMenu(), item = NSMenuItem(), m = NSMenu()
         m.addItem(withTitle: "Quit " + APP_NAME, action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         item.submenu = m; bar.addItem(item)
+        let rItem = NSMenuItem(), rMenu = NSMenu(title: "Recording")
+        let rm = NSMenuItem(title: "Render Mannequin", action: #selector(renderMannequin), keyEquivalent: "m")
+        rm.keyEquivalentModifierMask = [.command, .shift]; rm.target = self
+        rMenu.addItem(rm); rItem.submenu = rMenu; bar.addItem(rItem)
         NSApp.mainMenu = bar
     }
 

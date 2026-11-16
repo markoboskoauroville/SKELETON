@@ -45,4 +45,4 @@ Read by `blender/render_mannequin.py`. Numbers rounded to 4 decimals. UTF-8 JSON
 - A frame where the 3D request failed has `p2` only (no `p3`, no `r3`): hold the last pose or interpolate.
 - Times `t` are not exactly 1/fps apart: use `t`, not the index.
 - No person in a frame: the frame is still written with empty `p2` and no `p3`.
-- With several people, the one with the longest torso (the primary one) is recorded.
+- With several people, p2 is the one with the longest torso; p3 is the first person Vision returns. The header also has "duration" (seconds).

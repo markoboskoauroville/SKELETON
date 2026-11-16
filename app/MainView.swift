@@ -43,6 +43,12 @@ final class MainView: NSView, NSMenuDelegate {
     let sessionButton = NSButton()
     let skipButton = NSButton()
     let titleLabel = NSTextField(labelWithString: "")
+    let recordButton = NSButton()
+    let renderButton = NSButton()
+    let recPopup = NSPopUpButton()
+    var recordings: [URL] = []
+    var recorder: Recorder?
+    var renderProc: Process?
 
     var builtin: [NamedPose] = []
     var saved: [NamedPose] = []
@@ -67,6 +73,7 @@ final class MainView: NSView, NSMenuDelegate {
         Voice.shared.onChange = { [weak self] in self?.refreshSettings() }
         builtin = Store.builtin()
         refreshSaved()
+        refreshRecordings()
         let nc = NotificationCenter.default
         nc.addObserver(self, selector: #selector(devicesChanged), name: .AVCaptureDeviceWasConnected, object: nil)
         nc.addObserver(self, selector: #selector(devicesChanged), name: .AVCaptureDeviceWasDisconnected, object: nil)
@@ -75,9 +82,10 @@ final class MainView: NSView, NSMenuDelegate {
             self?.wake(); return e
         }
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] e in
-            guard e.keyCode == 49, e.modifierFlags.intersection([.command, .option, .control]).isEmpty else { return e }
-            self?.window?.toggleFullScreen(nil)
-            return nil
+            guard e.modifierFlags.intersection([.command, .option, .control]).isEmpty else { return e }
+            if e.keyCode == 49 { self?.window?.toggleFullScreen(nil); return nil }
+            if e.keyCode == 15 { self?.toggleRecord(); return nil }
+            return e
         }
         checkPermission(request: true)
         reloadDevices()
@@ -139,7 +147,9 @@ final class MainView: NSView, NSMenuDelegate {
         setTitle(sessionButton, "③ START SESSION")
         skipButton.isBordered = false; skipButton.target = self; skipButton.action = #selector(skip)
         setTitle(skipButton, "NEXT POSE"); skipButton.isHidden = true
-        let r2 = row([button("① LOAD POSE PHOTO", #selector(chooseFile)), button("② FREEZE MY POSE", #selector(freeze)), sessionButton, skipButton])
+        recordButton.isBordered = false; recordButton.target = self; recordButton.action = #selector(toggleRecord)
+        setRecordTitle("RECORD")
+        let r2 = row([button("① LOAD POSE PHOTO", #selector(chooseFile)), button("② FREEZE MY POSE", #selector(freeze)), sessionButton, skipButton, recordButton])
 
         savedPopup.target = self; savedPopup.action = #selector(savedChosen)
         savedPopup.widthAnchor.constraint(equalToConstant: 210).isActive = true
@@ -152,7 +162,14 @@ final class MainView: NSView, NSMenuDelegate {
         stage.level = Level(rawValue: max(0, levelSeg.selectedSegment)) ?? .beginner
         let r3 = row([savedPopup, lvl, levelSeg, button("CLEAR TARGET", #selector(clearTarget)), button("SETTINGS", #selector(showSettings))])
 
-        let col = NSStackView(views: [r0, r1, r2, r3])
+        recPopup.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        recPopup.setAccessibilityLabel("RECORDINGS")
+        recPopup.menu?.delegate = self
+        renderButton.isBordered = false; renderButton.target = self; renderButton.action = #selector(renderPressed)
+        setTitle(renderButton, "RENDER MANNEQUIN")
+        let rl = NSTextField(labelWithString: "RECORDINGS"); rl.font = MONO; rl.textColor = .white
+        let r4 = row([rl, recPopup, renderButton])
+        let col = NSStackView(views: [r0, r1, r2, r3, r4])
         col.orientation = .vertical; col.alignment = .leading; col.spacing = 8
         col.edgeInsets = NSEdgeInsets(top: 8, left: 14, bottom: 10, right: 14)
         col.translatesAutoresizingMaskIntoConstraints = false
@@ -210,6 +227,120 @@ final class MainView: NSView, NSMenuDelegate {
             })
         }
         if session != nil { stage.needsDisplay = true }
+        if let r = recorder {
+            let t = Int(r.seconds)
+            stage.recText = String(format: "%02d:%02d", t / 60, t % 60)
+            setRecordTitle("STOP " + stage.recText!)
+            stage.needsDisplay = true
+        }
+    }
+
+    // MARK: record and render the mannequin
+
+    func setRecordTitle(_ t: String) {
+        let a = NSMutableAttributedString(string: "● ", attributes: [.font: MONO, .foregroundColor: StageView.red])
+        a.append(NSAttributedString(string: t, attributes: [.font: MONO, .foregroundColor: NSColor.white]))
+        recordButton.attributedTitle = a
+        recordButton.setAccessibilityLabel(recorder == nil ? "RECORD" : "STOP RECORDING")
+    }
+
+    @objc func toggleRecord() {
+        if let _ = recorder { stopRecording(); return }
+        guard stage.image != nil else { stage.toast("NO CAMERA PICTURE YET"); return }
+        let r = Recorder(camera: stage.cameraName, mirror: stage.mirror)
+        recorder = r
+        camera.setRecorder(r)
+        stage.recText = "00:00"
+        setRecordTitle("STOP 00:00")
+    }
+
+    func stopRecording() {
+        guard recorder != nil else { return }
+        let r = camera.takeRecorder() ?? recorder
+        recorder = nil
+        stage.recText = nil
+        setRecordTitle("RECORD")
+        guard let rec = r else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let url = rec.write()
+            DispatchQueue.main.async {
+                if let u = url {
+                    self.refreshRecordings()
+                    self.stage.toast("RECORDED \(Int(rec.last)) S: " + u.lastPathComponent)
+                } else { self.stage.toast("RECORDING TOO SHORT, NOT SAVED") }
+            }
+        }
+    }
+
+    static var recDir: URL { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Movies/Skeleton", isDirectory: true) }
+
+    func refreshRecordings() {
+        let files = (try? FileManager.default.contentsOfDirectory(at: MainView.recDir, includingPropertiesForKeys: nil)) ?? []
+        recordings = files.filter { $0.lastPathComponent.hasSuffix(".skel.json") }.sorted { $0.lastPathComponent > $1.lastPathComponent }
+        recPopup.removeAllItems()
+        if recordings.isEmpty { recPopup.addItem(withTitle: "NONE YET"); return }
+        for u in recordings {
+            var len = ""
+            if let h = try? FileHandle(forReadingFrom: u) {
+                let d = h.readData(ofLength: 400); try? h.close()
+                if let str = String(data: d, encoding: .utf8), let r = str.range(of: "\"duration\":") {
+                    let num = str[r.upperBound...].prefix { "0123456789.".contains($0) }
+                    if let v = Double(num) { len = String(format: "  ·  %d:%02d", Int(v) / 60, Int(v) % 60) }
+                }
+            }
+            recPopup.addItem(withTitle: u.lastPathComponent.replacingOccurrences(of: ".skel.json", with: "") + len)
+        }
+        recPopup.selectItem(at: 0)
+    }
+
+    @objc func renderPressed() { renderSelected(last: false) }
+
+    func renderSelected(last: Bool) {
+        guard renderProc == nil else { stage.toast("A RENDER IS ALREADY RUNNING"); return }
+        refreshRecordings()
+        let idx = last ? 0 : max(0, recPopup.indexOfSelectedItem)
+        guard idx < recordings.count else { stage.toast("NO RECORDING YET: PRESS RECORD (R)"); return }
+        let script = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Developer/SKELETON/blender/render_mannequin.py").path
+        let blender = "/Applications/Blender.app/Contents/MacOS/Blender"
+        guard FileManager.default.fileExists(atPath: script) else { stage.toast("BLENDER PART NOT INSTALLED YET"); return }
+        guard FileManager.default.fileExists(atPath: blender) else { stage.toast("BLENDER IS NOT IN /Applications"); return }
+        let src = recordings[idx]
+        let base = src.lastPathComponent.replacingOccurrences(of: ".skel.json", with: "")
+        let out = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop/" + base + "_mannequin.mp4")
+        let p = Process(), pipe = Pipe()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/nice")
+        p.arguments = ["-n", "19", blender, "-b", "--factory-startup", "-P", script, "--", "--in", src.path, "--out", out.path]
+        p.standardOutput = pipe; p.standardError = pipe
+        var buf = "", done: String?
+        pipe.fileHandleForReading.readabilityHandler = { h in
+            let d = h.availableData
+            guard !d.isEmpty, let s = String(data: d, encoding: .utf8) else { return }
+            buf += s
+            while let nl = buf.firstIndex(of: "\n") {
+                let line = String(buf[..<nl]).trimmingCharacters(in: .whitespaces)
+                buf.removeSubrange(...nl)
+                if line.hasPrefix("PROGRESS ") {
+                    let t = String(line.dropFirst(9))
+                    DispatchQueue.main.async { self.setTitle(self.renderButton, "RENDERING " + t); self.stage.toast("RENDERING THE MANNEQUIN " + t) }
+                } else if line.hasPrefix("DONE ") { done = String(line.dropFirst(5)) }
+            }
+        }
+        p.terminationHandler = { proc in
+            pipe.fileHandleForReading.readabilityHandler = nil
+            DispatchQueue.main.async {
+                self.renderProc = nil
+                self.setTitle(self.renderButton, "RENDER MANNEQUIN")
+                let path = done ?? out.path
+                if proc.terminationStatus == 0, FileManager.default.fileExists(atPath: path) {
+                    let u = URL(fileURLWithPath: path)
+                    NSWorkspace.shared.activateFileViewerSelecting([u])
+                    NSWorkspace.shared.open(u)
+                    self.stage.toast("MANNEQUIN READY ON THE DESKTOP")
+                } else { self.stage.toast("THE RENDER FAILED (BLENDER EXIT \(proc.terminationStatus))") }
+            }
+        }
+        do { try p.run(); renderProc = p; setTitle(renderButton, "RENDERING..."); stage.toast("RENDERING THE MANNEQUIN...") }
+        catch { stage.toast("COULD NOT START BLENDER") }
     }
 
     // MARK: permission

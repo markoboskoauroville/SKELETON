@@ -56,6 +56,11 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
     private let tracker = Tracker()
     private(set) var formatText = ""
     private var current: AVCaptureDevice?
+    private var recorder: Recorder?
+    private let recLock = NSLock()
+    func setRecorder(_ r: Recorder?) { recLock.lock(); recorder = r; recLock.unlock() }
+    func takeRecorder() -> Recorder? { recLock.lock(); defer { recLock.unlock() }; let r = recorder; recorder = nil; return r }
+    private func currentRecorder() -> Recorder? { recLock.lock(); defer { recLock.unlock() }; return recorder }
 
     static func devices() -> [AVCaptureDevice] {
         let types: [AVCaptureDevice.DeviceType] = [.builtInWideAngleCamera, .external, .continuityCamera]
@@ -119,7 +124,15 @@ final class CameraController: NSObject, AVCaptureVideoDataOutputSampleBufferDele
         let w = CGFloat(CVPixelBufferGetWidth(pb)), h = CGFloat(CVPixelBufferGetHeight(pb))
         let req = VNDetectHumanBodyPoseRequest()
         let handler = VNImageRequestHandler(cvPixelBuffer: pb, orientation: .up, options: [:])
-        try? handler.perform([req])
+        var reqs: [VNRequest] = [req]
+        var req3: VNDetectHumanBodyPose3DRequest?
+        let rec = currentRecorder()
+        if rec != nil { let r = VNDetectHumanBodyPose3DRequest(); req3 = r; reqs.append(r) }
+        try? handler.perform(reqs)
+        if let rec = rec {
+            rec.add(time: CMSampleBufferGetPresentationTimeStamp(sampleBuffer).seconds, obs2d: req.results ?? [],
+                    obs3d: req3?.results?.first, w: Int(w), h: Int(h))
+        }
         let poses = tracker.update(extractPoses(req.results ?? [], aspect: w / h))
         let cb = onFrame
         DispatchQueue.main.async { cb?(img, CGSize(width: w, height: h), poses) }
