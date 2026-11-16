@@ -92,7 +92,9 @@ extension MainView {
         guard joints.count >= 6 else { return nil }
         let mean = errs.reduce(0, +) / Double(errs.count)
         let cover = Double(joints.count) / Double(Jt.allCases.count)
-        let q = Int((50 * cover + 50 * (1 - min(1, mean / 8))).rounded())
+        let errScore: Double = 1.0 - min(1.0, mean / 8.0)
+        let qd: Double = 50.0 * cover + 50.0 * errScore
+        let q = Int(qd.rounded())
         return TriResult(joints: joints, quality: max(0, min(100, q)), meanErrPx: mean, views: partners.count + 1)
     }
 
