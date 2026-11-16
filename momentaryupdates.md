@@ -23,3 +23,10 @@
 **16.11.2026:** "For some reason I am upside down in manual camera nothing over USB. So you need to detect upside down picture and simply rotate them."
 
 **16.11.2026:** "This is my personal application. So it can work with my personal phones. If ADB is there and camera not working, it needs to kick it in automatically. In the settings we can disable automatic kicks in of the cameras through ADB. By default it's enabled. and when I start the app it just scans Wi-Fi, USB, ADB and just automatically configures the phones to be able to record and find the Sony so pictures is coming through these devices I have for now three"
+
+
+## 16.11.2026, finish all unfinished works (Marko, word for word)
+
+"finish all unfinished works. Now. Everything."
+
+**Skeleton leftovers (v15):** (1) The OBS Virtual Camera shows its placeholder logo, not black: detect static placeholders too (frames that do not change over 2 s and no person ever seen) and list them as text "no picture (static)", checked again by itself. (2) Bundle adjustment across all cameras after the pairwise chained calibration (poses, optionally intrinsics, Levenberg-Marquardt with Accelerate, unit tests on synthetic 3-4 camera rigs with noise). (3) The window opened on the BenQ: open on the MacBook Pro's built-in screen on first launch or when the saved frame is on a missing or non-built-in screen; keep his later choice. (4) The 5 floor poses (down-dog, forward-fold, plank, chaturanga, upward-dog) in the session list and a ready "Wyoga" sequence (Upward Salute, Down Dog, Warrior II, Tree, Sun Salutation steps).
