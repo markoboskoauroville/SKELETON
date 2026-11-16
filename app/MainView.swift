@@ -252,6 +252,8 @@ final class MainView: NSView, NSMenuDelegate {
         let rUse = row(useSw)
         multiRow.setViews([r6, rUse], in: .leading)
         multiRow.orientation = .vertical
+        multiRow.alignment = .leading
+        multiRow.spacing = 8
         multiRow.isHidden = true
         presetPopup.addItems(withTitles: ["gentle", "standard", "strong", "yoga-hold", "dance"])
         presetPopup.selectItem(withTitle: defaults.string(forKey: "preset") ?? "standard")

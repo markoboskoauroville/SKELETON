@@ -166,7 +166,6 @@ extension MainView {
         if let k = slots.firstIndex(where: { $0 === s }), k > 0 {
             s.use = defaults.object(forKey: "use." + CalibStore.safe(s.uid)) as? Bool ?? true
             useSw[k - 1].isOn = s.use
-            useSw[k - 1].label.stringValue = "USE " + String(s.stage.cameraName.uppercased().prefix(14))
         }
         if let a = slots.first, s !== a {
             s.extr = CalibStore.loadExtrinsics(a: a.uid, b: s.uid)
