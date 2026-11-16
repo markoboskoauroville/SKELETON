@@ -58,6 +58,7 @@ struct Frame {
     var raw: [Pose]          // as Vision gave them (for the recording)
     var t: Double            // host clock seconds
     var lum: Double
+    var lumStd = 0.0
     var v3: V3Obs?
     var analyzed = true      // false: only the picture is new, the poses are the last analysed ones (see Pipeline.analysisEvery)
 }
@@ -214,7 +215,7 @@ final class Pipeline {
         }
         counter += 1
         if analysisEvery > 1 && counter % analysisEvery != 0 {
-            let f = Frame(image: img, size: CGSize(width: w, height: h), poses: lastPoses, raw: [], t: t, lum: 0, v3: nil, analyzed: false)
+            let f = Frame(image: img, size: CGSize(width: w, height: h), poses: lastPoses, raw: [], t: t, lum: -1, lumStd: 0, v3: nil, analyzed: false)
             let cb = onFrame
             DispatchQueue.main.async { cb?(f) }
             return
@@ -229,7 +230,8 @@ final class Pipeline {
         let poses = tracker.update(raw)
         lastPoses = poses
         let v3 = req3?.results?.first.map { extract3D($0) }
-        let f = Frame(image: img, size: CGSize(width: w, height: h), poses: poses, raw: raw, t: t, lum: meanLuminance(pb), v3: v3)
+        let luma = lumaStats(pb)
+        let f = Frame(image: img, size: CGSize(width: w, height: h), poses: poses, raw: raw, t: t, lum: luma.mean, lumStd: luma.std, v3: v3)
         let cb = onFrame
         DispatchQueue.main.async { cb?(f) }
     }

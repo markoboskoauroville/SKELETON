@@ -7,11 +7,14 @@ extension MainView {
 
     func primaryPose(_ poses: [Pose]) -> Pose? { poses.max { ($0.torso ?? 0) < ($1.torso ?? 0) } }
 
-    var activeIdx: [Int] { slots.indices.filter { $0 == 0 || slots[$0].use } }
+    var activeIdx: [Int] { slots.indices.filter { ($0 == 0 || slots[$0].use) && slots[$0].missingText == nil } }
 
     func frame(_ s: Slot, _ f: Frame) {
         guard let idx = slots.firstIndex(where: { $0 === s }) else { return }
         s.size = f.size
+        s.lastFrameWall = Date()
+        checkPicture(s, f)
+        if s.missingText != nil { return }          // a black or missing picture: no tile, no triangulation, listed below the grid
         if let k = s.intr, k.width != Int(f.size.width) || k.height != Int(f.size.height) {
             s.intr = nil; s.extr = nil
             if !s.sizeWarned { s.sizeWarned = true; s.stage.toast("THE CALIBRATION IS FOR ANOTHER PICTURE SIZE: CALIBRATE AGAIN") }
@@ -56,6 +59,99 @@ extension MainView {
         if let c = wizardClear, Date() > c { wizardClear = nil; setWizard(nil) }
     }
 
+    // MARK: black pictures and sources that stopped
+
+    /// Black or uniform for over a second (mean under 8 of 255, almost no variation): no picture. Back after half a second of a real one.
+    func checkPicture(_ s: Slot, _ f: Frame) {
+        guard f.lum >= 0 else { return }
+        let now = Date()
+        if f.lum < 8 && f.lumStd < 4 {
+            s.goodSince = nil
+            if s.blackSince == nil { s.blackSince = now }
+            if s.missingText == nil, now.timeIntervalSince(s.blackSince!) > 1.2, now.timeIntervalSince(s.startedAt) > 1 {
+                setMissing(s, "no picture")
+            }
+        } else {
+            s.blackSince = nil
+            if s.goodSince == nil { s.goodSince = now }
+            if s.missingText != nil, now.timeIntervalSince(s.goodSince!) > 0.5 {
+                s.missingText = nil
+                rebuildMissingBar(); needsLayout = true
+            }
+        }
+    }
+
+    func setMissing(_ s: Slot, _ why: String) {
+        guard s.missingText != why else { return }
+        s.missingText = why
+        rebuildMissingBar(); needsLayout = true
+    }
+
+    func rebuildMissingBar() {
+        let key = slots.map { ($0.missingText ?? "-") + $0.stage.cameraName }.joined(separator: "|")
+        guard key != missingKey else { return }
+        missingKey = key
+        missingBar.subviews.forEach { $0.removeFromSuperview() }
+        var y: CGFloat = 0
+        for (k, s) in slots.enumerated() {
+            guard let why = s.missingText else { continue }
+            let name = s.stage.cameraName.isEmpty ? "CAMERA \(k + 1)" : s.stage.cameraName
+            let label = NSTextField(labelWithString: "\(name)  ·  \(why)  ·  CHECKED AGAIN BY ITSELF")
+            label.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .bold)
+            label.textColor = NSColor(srgbRed: 0.91, green: 0.64, blue: 0.24, alpha: 1)
+            label.lineBreakMode = .byWordWrapping
+            label.frame = NSRect(x: 14, y: y + 4, width: 600, height: 18)
+            missingBar.addSubview(label)
+            let b = button((why.contains("offline") || s.phone != nil) ? "CONNECT" : "RETRY", #selector(retryPressed(_:)))
+            b.tag = k
+            b.frame = NSRect(x: 630, y: y + 3, width: 90, height: 20)
+            missingBar.addSubview(b)
+            y += 26
+        }
+    }
+
+    @objc func retryPressed(_ b: NSButton) {
+        guard b.tag < slots.count else { return }
+        restart(b.tag)
+        slots[b.tag].stage.toast("TRYING AGAIN...")
+    }
+
+    /// Start a source again: an AVFoundation camera is found again by its unique ID (or name) after a replug; a phone goes
+    /// through its own start (adb forward, Manual Camera).
+    func restart(_ k: Int) {
+        let s = slots[k]
+        s.lastRestart = Date()
+        if let p = s.phone { selectPhone(p.phone, slot: k); return }
+        devices = AVCameraSource.devices()
+        let uid = s.uid, name = s.stage.cameraName
+        if let d = devices.first(where: { $0.uniqueID == uid }) ?? devices.first(where: { $0.localizedName == name }) { select(d, slot: k) }
+    }
+
+    /// Every half second: sources that gave no frames for 2 s are listed as missing and started again every 10 s;
+    /// the start-up line says which cameras are found.
+    func watchSources() {
+        let now = Date()
+        for (k, s) in slots.enumerated() where s.device != nil || s.phone != nil {
+            let silent = now.timeIntervalSince(s.lastFrameWall) > 2
+            if s.missingText == nil, silent, now.timeIntervalSince(s.startedAt) > 4 {
+                setMissing(s, s.phone != nil && s.phone?.statusText.contains("OFFLINE") == true ? "offline" : "no picture (no frames)")
+            }
+            if s.missingText != nil, silent, now.timeIntervalSince(s.lastRestart) > 10 { restart(k) }
+        }
+        rebuildMissingBar()
+        if now < startupUntil, calStep == .idle {
+            var all = true
+            let parts = slots.enumerated().map { (k, s) -> String in
+                let name = s.stage.cameraName.isEmpty ? "CAMERA \(k + 1)" : s.stage.cameraName
+                let ok = s.lastFrameWall > Date.distantPast && s.missingText == nil
+                if !ok { all = false }
+                return name + (ok ? " ✓" : " ...")
+            }
+            if !all { setWizard("FINDING CAMERAS: " + parts.joined(separator: "   ")) }
+            else if slots[0].stage.wizard?.hasPrefix("FINDING") == true { setWizard(nil) }
+        } else if slots[0].stage.wizard?.hasPrefix("FINDING") == true { setWizard(nil) }
+    }
+
     // MARK: triangulation
 
     var calibrated: Bool {
@@ -69,7 +165,7 @@ extension MainView {
         guard calibrated, let KA = slots[0].intr, let pa = primaryPose(f.poses) else { return nil }
         struct View { var idx: Int; var K: Intrinsics; var R: M3; var t: V3; var pose: Pose; var H: Double }
         var views: [View] = [View(idx: 0, K: KA, R: matrix_identity_double3x3, t: V3(0, 0, 0), pose: pa, H: Double(f.size.height))]
-        for (k, s) in slots.enumerated() where k > 0 && s.use {
+        for (k, s) in slots.enumerated() where k > 0 && s.use && s.missingText == nil {
             guard let K = s.intr, let e = s.extr?.E else { continue }
             let want = f.t + s.offset
             guard let h = s.hist.min(by: { abs($0.t - want) < abs($1.t - want) }), abs(h.t - want) < 0.05, let pb = h.pose else { continue }

@@ -33,24 +33,30 @@ func cgImage(from pb: CVPixelBuffer) -> CGImage? {
 }
 
 /// Mean luminance 0...255 of a BGRA buffer, sampled on a coarse grid (used for the flash-based sync).
-func meanLuminance(_ pb: CVPixelBuffer) -> Double {
+func meanLuminance(_ pb: CVPixelBuffer) -> Double { lumaStats(pb).mean }
+
+/// Mean and standard deviation of the luminance on a coarse grid: a black or uniform picture has both near zero.
+func lumaStats(_ pb: CVPixelBuffer) -> (mean: Double, std: Double) {
     CVPixelBufferLockBaseAddress(pb, .readOnly)
     defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
-    guard let base = CVPixelBufferGetBaseAddress(pb) else { return 0 }
+    guard let base = CVPixelBufferGetBaseAddress(pb) else { return (0, 0) }
     let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb), bpr = CVPixelBufferGetBytesPerRow(pb)
     let p = base.assumingMemoryBound(to: UInt8.self)
-    var sum = 0.0, n = 0.0
+    var sum = 0.0, sum2 = 0.0, n = 0.0
     let sx = max(1, w / 48), sy = max(1, h / 27)
     var y = 0
     while y < h {
         var x = 0
         while x < w {
             let o = y * bpr + x * 4
-            sum += 0.114 * Double(p[o]) + 0.587 * Double(p[o + 1]) + 0.299 * Double(p[o + 2])
+            let l = 0.114 * Double(p[o]) + 0.587 * Double(p[o + 1]) + 0.299 * Double(p[o + 2])
+            sum += l; sum2 += l * l
             n += 1
             x += sx
         }
         y += sy
     }
-    return n > 0 ? sum / n : 0
+    guard n > 0 else { return (0, 0) }
+    let m = sum / n
+    return (m, max(0, sum2 / n - m * m).squareRoot())
 }

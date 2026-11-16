@@ -49,6 +49,16 @@ final class Slot {
     var calViews: [[V2]] = []
     var lastCap: [V2]?
     var solving = false
+    // the picture check (Marko: a black picture is ignored and listed as text so he can enable it)
+    var startedAt = Date()
+    var lastFrameWall = Date.distantPast
+    var blackSince: Date?
+    var goodSince: Date?
+    var lastRestart = Date()
+    var missingText: String?             // non-nil: no tile, listed below the grid with a button
+    var offlineNote: String?
+    /// A source was (re)started: the check begins again, but a hidden tile stays hidden until a good picture comes.
+    func restarted() { startedAt = Date(); lastFrameWall = .distantPast; blackSince = nil; goodSince = nil }
     var phone: PhoneSource?              // "Manual Camera (Pixel, USB)" (PhoneSource.swift) instead of an AVCapture device
     var uid: String { device?.uniqueID ?? phone?.uniqueID ?? "" }
 }
@@ -76,6 +86,10 @@ final class MainView: NSView, NSMenuDelegate {
     var wizardClear: Date?
     let calibrateButton = NSButton()
     let multiRow = NSStackView()
+    let missingBar = NSView()
+    var settingsBox: NSStackView?
+    var missingKey = ""
+    var startupUntil = Date().addingTimeInterval(9)
     var devices: [AVCaptureDevice] = []
     var device: AVCaptureDevice? { slots[0].device }
     let defaults = UserDefaults.standard
@@ -115,6 +129,7 @@ final class MainView: NSView, NSMenuDelegate {
         wantsLayer = true
         addSubview(slots[0].stage)
         buildControls()
+        addSubview(missingBar)
         addSubview(controls)
         stage.onDropURL = { [weak self] in self?.loadPhoto($0) }
         stage.onAchieved = { [weak self] in self?.achieved() }
@@ -278,11 +293,17 @@ final class MainView: NSView, NSMenuDelegate {
         settingsPopover.behavior = .transient
         let vc = NSViewController()
         settingsText.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-        settingsText.preferredMaxLayoutWidth = 420
-        let box = NSView(frame: NSRect(x: 0, y: 0, width: 450, height: 330))
-        settingsText.frame = NSRect(x: 15, y: 10, width: 420, height: 310)
-        box.addSubview(settingsText)
-        vc.view = box
+        settingsText.preferredMaxLayoutWidth = 440
+        settingsText.translatesAutoresizingMaskIntoConstraints = false
+        settingsText.widthAnchor.constraint(equalToConstant: 440).isActive = true
+        let autoPhone = SwitchRow("AUTO START PHONE CAMERAS (ADB)", on: PhoneSource.autoStart)
+        autoPhone.onChange = { PhoneSource.autoStart = $0 }
+        let stack = NSStackView(views: [autoPhone, settingsText])
+        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 12
+        stack.edgeInsets = NSEdgeInsets(top: 14, left: 15, bottom: 14, right: 15)
+        stack.frame = NSRect(x: 0, y: 0, width: 470, height: 420)
+        settingsBox = stack
+        vc.view = stack
         settingsPopover.contentViewController = vc
     }
 
@@ -293,13 +314,21 @@ final class MainView: NSView, NSMenuDelegate {
 
     override func layout() {
         super.layout()
-        let n = slots.count
+        let rowH: CGFloat = 26
+        let missing = slots.filter { $0.missingText != nil }
+        let barH = CGFloat(missing.count) * rowH
+        missingBar.frame = NSRect(x: 0, y: bounds.height - barH, width: bounds.width, height: barH)
+        missingBar.isHidden = missing.isEmpty
+        let visible = slots.filter { $0.missingText == nil }
+        for s in slots where s.missingText != nil { s.stage.isHidden = true }
+        let area = NSRect(x: 0, y: 0, width: bounds.width, height: bounds.height - barH)
+        let n = max(1, visible.count)
         if n == 4 {                                           // a grid of four
-            let w = bounds.width / 2, h = bounds.height / 2
-            for (i, s) in slots.enumerated() { s.stage.frame = NSRect(x: CGFloat(i % 2) * w, y: CGFloat(i / 2) * h, width: w, height: h) }
+            let w = area.width / 2, h = area.height / 2
+            for (i, s) in visible.enumerated() { s.stage.isHidden = false; s.stage.frame = NSRect(x: CGFloat(i % 2) * w, y: CGFloat(i / 2) * h, width: w, height: h) }
         } else {
-            let w = bounds.width / CGFloat(n)
-            for (i, s) in slots.enumerated() { s.stage.frame = NSRect(x: CGFloat(i) * w, y: 0, width: w, height: bounds.height) }
+            let w = area.width / CGFloat(n)
+            for (i, s) in visible.enumerated() { s.stage.isHidden = false; s.stage.frame = NSRect(x: CGFloat(i) * w, y: 0, width: w, height: area.height) }
         }
         let h = max(60, controls.fittingSize.height)
         controls.frame = NSRect(x: 0, y: 0, width: bounds.width, height: h)
@@ -330,6 +359,7 @@ final class MainView: NSView, NSMenuDelegate {
             })
         }
         if session != nil { stage.needsDisplay = true }
+        watchSources()
         if let r = recorder {
             let t = Int(r.seconds)
             stage.recText = String(format: "%02d:%02d", t / 60, t % 60)
@@ -526,6 +556,7 @@ final class MainView: NSView, NSMenuDelegate {
             }
             if pick == nil, let cur = slots[k].device { pick = devices.first { $0.uniqueID == cur.uniqueID && !taken.contains($0.uniqueID) } }
             if pick == nil, let id = defaults.string(forKey: k == 0 ? "camera" : "camera\(k)") { pick = devices.first { $0.uniqueID == id && !taken.contains($0.uniqueID) } }
+            if pick == nil { pick = devices.first { $0.localizedName.contains("ILCE") && !taken.contains($0.uniqueID) } }   // the Sony is found by itself
             if pick == nil { pick = devices.first { !taken.contains($0.uniqueID) } }
             guard let p = pick else { continue }
             taken.append(p.uniqueID)
@@ -567,7 +598,7 @@ final class MainView: NSView, NSMenuDelegate {
         s.pipe.onAutoTurns = { [weak self, weak s] t in
             guard let self = self, let s = s, !s.uid.isEmpty else { return }
             self.defaults.set(t, forKey: "turns." + s.uid)
-            s.size = .zero; s.hist = []
+            s.size = .zero; s.hist = []; s.restarted()
             s.stage.toast("PICTURE TURNED \(t * 90)° (IT WAS NOT UPRIGHT) · RIGHT CLICK TO CHANGE")
         }
     }
@@ -583,7 +614,7 @@ final class MainView: NSView, NSMenuDelegate {
             s.pipe.turns = it.tag; s.pipe.autoOrient = false
             s.stage.toast("ROTATED \(it.tag * 90)°")
         }
-        s.size = .zero; s.hist = []
+        s.size = .zero; s.hist = []; s.restarted()
     }
 
     /// The camera's remembered turn (right click) before its first frame.
@@ -601,7 +632,7 @@ final class MainView: NSView, NSMenuDelegate {
         s.stage.mirror = m
         if k == 0 { mirrorSw.isOn = m }
         s.stage.cameraName = d.localizedName
-        s.size = .zero; s.hist = []; s.sizeWarned = false
+        s.size = .zero; s.hist = []; s.restarted(); s.sizeWarned = false
         loadCalibration(s)
         guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else { return }
         let src = AVCameraSource(device: d)
@@ -630,7 +661,7 @@ final class MainView: NSView, NSMenuDelegate {
         s.stage.mirror = m
         if k == 0 { mirrorSw.isOn = m }
         s.stage.cameraName = ph.label
-        s.size = .zero; s.hist = []; s.sizeWarned = false
+        s.size = .zero; s.hist = []; s.restarted(); s.sizeWarned = false
         s.formatText = "starting the \(ph.short)..."
         applyTurns(s)
         s.pipe.attach(src)
@@ -772,6 +803,7 @@ final class MainView: NSView, NSMenuDelegate {
 
     @objc func showSettings() {
         refreshSettings()
+        if let b = settingsBox { b.setFrameSize(NSSize(width: 470, height: max(160, b.fittingSize.height))) }
         settingsPopover.show(relativeTo: controls.bounds, of: controls, preferredEdge: .minY)
     }
 
