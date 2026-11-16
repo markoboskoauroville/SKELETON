@@ -85,6 +85,9 @@ final class MainView: NSView, NSMenuDelegate {
     let recPopup = NSPopUpButton()
     var recordings: [URL] = []
     var recorder: Recorder?
+    let presetPopup = NSPopUpButton()
+    var useCleanSw: SwitchRow!
+    var toolBusy = false
     var renderProc: Process?
 
     var builtin: [NamedPose] = []
@@ -226,7 +229,17 @@ final class MainView: NSView, NSMenuDelegate {
         multiRow.setViews([r6], in: .leading)
         multiRow.orientation = .vertical
         multiRow.isHidden = true
-        let col = NSStackView(views: [r0, r1, r2, r3, r4, r5, multiRow])
+        presetPopup.addItems(withTitles: ["gentle", "standard", "strong", "yoga-hold", "dance"])
+        presetPopup.selectItem(withTitle: defaults.string(forKey: "preset") ?? "standard")
+        presetPopup.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        presetPopup.target = self; presetPopup.action = #selector(presetChosen)
+        presetPopup.setAccessibilityLabel("CLEAN PRESET")
+        presetPopup.menu?.delegate = self
+        useCleanSw = SwitchRow("USE CLEANED", on: defaults.object(forKey: "usecleaned") as? Bool ?? true)
+        useCleanSw.onChange = { [weak self] on in self?.defaults.set(on, forKey: "usecleaned") }
+        let r7 = row([presetPopup, button("CLEAN", #selector(cleanPressed)), button("REPORT", #selector(openReport)), useCleanSw,
+                      button("EXPORT FOR CLAUDE", #selector(exportForClaude)), button("IMPORT CLAUDE ANSWER", #selector(importClaude))])
+        let col = NSStackView(views: [r0, r1, r2, r3, r4, r7, r5, multiRow])
         col.orientation = .vertical; col.alignment = .leading; col.spacing = 8
         col.edgeInsets = NSEdgeInsets(top: 8, left: 14, bottom: 10, right: 14)
         col.translatesAutoresizingMaskIntoConstraints = false
@@ -332,11 +345,20 @@ final class MainView: NSView, NSMenuDelegate {
         }
     }
 
+    /// <name>.clean.skel.json or <name>.claude.skel.json beside <name>.skel.json
+    static func variant(_ u: URL, _ kind: String) -> URL {
+        let n = u.lastPathComponent.replacingOccurrences(of: ".skel.json", with: "")
+        return u.deletingLastPathComponent().appendingPathComponent(n + "." + kind + ".skel.json")
+    }
+
     static var recDir: URL { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Movies/Skeleton", isDirectory: true) }
 
     func refreshRecordings() {
         let files = (try? FileManager.default.contentsOfDirectory(at: MainView.recDir, includingPropertiesForKeys: nil)) ?? []
-        recordings = files.filter { $0.lastPathComponent.hasSuffix(".skel.json") }.sorted { $0.lastPathComponent > $1.lastPathComponent }
+        recordings = files.filter {
+            let n = $0.lastPathComponent
+            return n.hasSuffix(".skel.json") && !n.contains(".clean.") && !n.contains(".claude.")
+        }.sorted { $0.lastPathComponent > $1.lastPathComponent }
         recPopup.removeAllItems()
         if recordings.isEmpty { recPopup.addItem(withTitle: "NONE YET"); return }
         for u in recordings {
@@ -348,7 +370,10 @@ final class MainView: NSView, NSMenuDelegate {
                     if let v = Double(num) { len = String(format: "  ·  %d:%02d", Int(v) / 60, Int(v) % 60) }
                 }
             }
-            recPopup.addItem(withTitle: u.lastPathComponent.replacingOccurrences(of: ".skel.json", with: "") + len)
+            var tag = ""
+            if FileManager.default.fileExists(atPath: MainView.variant(u, "clean").path) { tag += "  ·  cleaned" }
+            if FileManager.default.fileExists(atPath: MainView.variant(u, "claude").path) { tag += "  ·  claude" }
+            recPopup.addItem(withTitle: u.lastPathComponent.replacingOccurrences(of: ".skel.json", with: "") + len + tag)
         }
         recPopup.selectItem(at: 0)
     }
@@ -364,8 +389,14 @@ final class MainView: NSView, NSMenuDelegate {
         let blender = "/Applications/Blender.app/Contents/MacOS/Blender"
         guard FileManager.default.fileExists(atPath: script) else { stage.toast("BLENDER PART NOT INSTALLED YET"); return }
         guard FileManager.default.fileExists(atPath: blender) else { stage.toast("BLENDER IS NOT IN /Applications"); return }
-        let src = recordings[idx]
-        let base = src.lastPathComponent.replacingOccurrences(of: ".skel.json", with: "")
+        let rec = recordings[idx]
+        var src = rec
+        if useCleanSw.isOn {
+            let claude = MainView.variant(rec, "claude"), clean = MainView.variant(rec, "clean")
+            if FileManager.default.fileExists(atPath: claude.path) { src = claude }
+            else if FileManager.default.fileExists(atPath: clean.path) { src = clean }
+        }
+        let base = rec.lastPathComponent.replacingOccurrences(of: ".skel.json", with: "")
         let out = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop/" + base + "_mannequin.mp4")
         let p = Process(), pipe = Pipe()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/nice")
