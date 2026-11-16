@@ -94,6 +94,7 @@ final class MainView: NSView, NSMenuDelegate {
     var lastMove = Date()
     var openMenus = 0
     var pendingCamera: String?
+    var pendingCams: [String] = []
     var authorized = false
     let settingsPopover = NSPopover()
     let settingsText = NSTextField(wrappingLabelWithString: "")
@@ -429,7 +430,10 @@ final class MainView: NSView, NSMenuDelegate {
         var taken: [String] = []
         for k in 0..<slots.count {
             var pick: AVCaptureDevice?
-            if k == 0, let name = pendingCamera?.lowercased() {
+            if k < pendingCams.count, !pendingCams[k].isEmpty {
+                let name = pendingCams[k].lowercased()
+                pick = devices.first { ($0.localizedName.lowercased().contains(name) || $0.uniqueID.lowercased() == name) && !taken.contains($0.uniqueID) }
+            } else if k == 0, let name = pendingCamera?.lowercased() {
                 pick = devices.first { $0.localizedName.lowercased().contains(name) || $0.uniqueID.lowercased() == name }
             }
             if pick == nil, let cur = slots[k].device { pick = devices.first { $0.uniqueID == cur.uniqueID && !taken.contains($0.uniqueID) } }
@@ -442,7 +446,7 @@ final class MainView: NSView, NSMenuDelegate {
             let changed = slots[k].device?.uniqueID != p.uniqueID
             if changed || (k == 0 && pendingCamera != nil) { select(p, slot: k) }
         }
-        pendingCamera = nil
+        pendingCamera = nil; pendingCams = []
     }
 
     @objc func cameraChosen() { chooseCamera(0, cameraPopup) }

@@ -46,3 +46,22 @@ Read by `blender/render_mannequin.py`. Numbers rounded to 4 decimals. UTF-8 JSON
 - Times `t` are not exactly 1/fps apart: use `t`, not the index.
 - No person in a frame: the frame is still written with empty `p2` and no `p3`.
 - With several people, p2 is the one with the longest torso; p3 is the first person Vision returns. The header also has "duration" (seconds).
+
+## Version 4 additions (16.11.2026): several cameras, triangulated 3D
+
+Backward compatible: every field above is unchanged; readers that ignore unknown keys keep working.
+
+Header, new keys:
+- `"source"`: `"vision3d"` (one camera, Vision's own 3D) or `"triangulated"` (2 or 3 calibrated cameras; the frames' `p3` is triangulated from the 2D joints).
+- `"cameras"`: list, camera 1 first. Each: `name`, `uid`, `width`, `height`, `offsetMs` (how much later this camera shows the same moment than camera 1),
+  and when calibrated `model` ("fisheye-kb4"), `fx`, `fy`, `cx`, `cy`, `k` (4 coefficients), `R` (9 numbers, row-major) and `t` (3 numbers, metres) = the pose
+  of that camera relative to camera 1 (camera 1: identity and zero), `reprojectionPx` (calibration error). `width`/`height` at the top are camera 1's.
+  A point X in camera 1's frame is seen by camera n at R X + t. The camera frame is x right, y down, z forward, units metres.
+
+Per frame, new keys:
+- `"s"`: `"tri"` (this frame's `p3` is triangulated) or `"vision3d"` (Vision's own 3D, used when triangulation was not possible for this frame).
+- `"q"`: tracking quality 0...100 (only with `"s":"tri"`): joints found in at least two views and their reprojection error.
+
+`p3` in a triangulated frame uses the same joint names as before (`roles3d`), root-relative, y up, x = the subject's left when he faces camera 1, z toward
+camera 1 (same convention as the sample file). `centerShoulder` is the 2D neck, `centerHead` the nose, `spine` the half way point, `topHead` an estimate above the nose;
+there is no `r3` in a triangulated frame. `p2` stays camera 1's raw (unmirrored) 2D joints.

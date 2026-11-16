@@ -23,6 +23,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         main = MainView(frame: NSRect(x: 0, y: 0, width: 1100, height: 720))
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--camera"), i + 1 < args.count { main.pendingCamera = args[i + 1]; main.reloadDevices() }
+        if let i = args.firstIndex(of: "--cameras"), i + 1 < args.count {
+            let names = args[i + 1].split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }
+            let n = max(1, min(3, names.count))
+            main.pendingCams = names
+            UserDefaults.standard.set(n, forKey: "camcount")
+            main.camSeg.selectedSegment = n - 1
+            main.setCameraCount(n)
+        }
         w.contentView = main
         w.setFrameAutosaveName("SkeletonMain")
         if UserDefaults.standard.object(forKey: "NSWindow Frame SkeletonMain") == nil { w.center() }
