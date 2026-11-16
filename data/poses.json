@@ -363,5 +363,380 @@
    ]
   },
   "aspect": 1.0
+ },
+ {
+  "id": "down-dog",
+  "name": "Down Dog",
+  "speak": "Down dog, Adho Mukha Svanasana",
+  "cues": [
+   "Hands shoulder-width, fingers spread, press the floor away.",
+   "Lift the hips up and back into an upside-down V, spine long.",
+   "Heels reach toward the floor, head between the arms."
+  ],
+  "joints": {
+   "nose": [
+    0.279,
+    0.622
+   ],
+   "neck": [
+    0.3133,
+    0.4975
+   ],
+   "leftShoulder": [
+    0.3228,
+    0.4877
+   ],
+   "rightShoulder": [
+    0.3228,
+    0.4877
+   ],
+   "leftElbow": [
+    0.1893,
+    0.626
+   ],
+   "rightElbow": [
+    0.1893,
+    0.626
+   ],
+   "leftWrist": [
+    0.07,
+    0.7495
+   ],
+   "rightWrist": [
+    0.07,
+    0.7495
+   ],
+   "root": [
+    0.5375,
+    0.2654
+   ],
+   "leftHip": [
+    0.5518,
+    0.2505
+   ],
+   "rightHip": [
+    0.5518,
+    0.2505
+   ],
+   "leftKnee": [
+    0.7387,
+    0.4791
+   ],
+   "rightKnee": [
+    0.7387,
+    0.4791
+   ],
+   "leftAnkle": [
+    0.93,
+    0.713
+   ],
+   "rightAnkle": [
+    0.93,
+    0.713
+   ]
+  },
+  "aspect": 1.0,
+  "view": "side",
+  "source": "blender/yoga_poses.py (wooden mannequin, 16.11.2026)"
+ },
+ {
+  "id": "forward-fold",
+  "name": "Forward Fold",
+  "speak": "Forward fold, Uttanasana",
+  "cues": [
+   "Fold from the hips, not the waist.",
+   "Let the head hang, hands to the floor or the shins.",
+   "Bend the knees a little if the back rounds."
+  ],
+  "joints": {
+   "nose": [
+    0.5748,
+    0.6363
+   ],
+   "neck": [
+    0.4997,
+    0.4806
+   ],
+   "leftShoulder": [
+    0.5016,
+    0.4618
+   ],
+   "rightShoulder": [
+    0.5016,
+    0.4618
+   ],
+   "leftElbow": [
+    0.4076,
+    0.7092
+   ],
+   "rightElbow": [
+    0.4076,
+    0.7092
+   ],
+   "leftWrist": [
+    0.3237,
+    0.93
+   ],
+   "rightWrist": [
+    0.3237,
+    0.93
+   ],
+   "root": [
+    0.6567,
+    0.0904
+   ],
+   "leftHip": [
+    0.6763,
+    0.07
+   ],
+   "rightHip": [
+    0.6763,
+    0.07
+   ],
+   "leftKnee": [
+    0.6057,
+    0.4703
+   ],
+   "rightKnee": [
+    0.6057,
+    0.4703
+   ],
+   "leftAnkle": [
+    0.5335,
+    0.8798
+   ],
+   "rightAnkle": [
+    0.5335,
+    0.8798
+   ]
+  },
+  "aspect": 1.0,
+  "view": "side-front",
+  "source": "blender/yoga_poses.py (wooden mannequin, 16.11.2026)"
+ },
+ {
+  "id": "plank",
+  "name": "Plank",
+  "speak": "Plank, Phalakasana",
+  "cues": [
+   "Wrists under the shoulders, arms straight.",
+   "One straight line from the head to the heels.",
+   "Belly in, hips neither high nor low."
+  ],
+  "joints": {
+   "nose": [
+    0.07,
+    0.3725
+   ],
+   "neck": [
+    0.1743,
+    0.3472
+   ],
+   "leftShoulder": [
+    0.1853,
+    0.3502
+   ],
+   "rightShoulder": [
+    0.1853,
+    0.3502
+   ],
+   "leftElbow": [
+    0.1853,
+    0.51
+   ],
+   "rightElbow": [
+    0.1853,
+    0.51
+   ],
+   "leftWrist": [
+    0.1853,
+    0.6528
+   ],
+   "rightWrist": [
+    0.1853,
+    0.6528
+   ],
+   "root": [
+    0.4336,
+    0.4165
+   ],
+   "leftHip": [
+    0.4501,
+    0.421
+   ],
+   "rightHip": [
+    0.4501,
+    0.421
+   ],
+   "leftKnee": [
+    0.6873,
+    0.4844
+   ],
+   "rightKnee": [
+    0.6873,
+    0.4844
+   ],
+   "leftAnkle": [
+    0.93,
+    0.5493
+   ],
+   "rightAnkle": [
+    0.93,
+    0.5493
+   ]
+  },
+  "aspect": 1.0,
+  "view": "side",
+  "source": "blender/yoga_poses.py (wooden mannequin, 16.11.2026)"
+ },
+ {
+  "id": "chaturanga",
+  "name": "Chaturanga",
+  "speak": "Chaturanga, Chaturanga Dandasana",
+  "cues": [
+   "Lower halfway, elbows bent to ninety degrees.",
+   "Elbows hug the ribs, body straight like a plank.",
+   "Shoulders at elbow height, not lower."
+  ],
+  "joints": {
+   "nose": [
+    0.07,
+    0.473
+   ],
+   "neck": [
+    0.1651,
+    0.4282
+   ],
+   "leftShoulder": [
+    0.1763,
+    0.4289
+   ],
+   "rightShoulder": [
+    0.1763,
+    0.4289
+   ],
+   "leftElbow": [
+    0.3328,
+    0.432
+   ],
+   "rightElbow": [
+    0.3328,
+    0.432
+   ],
+   "leftWrist": [
+    0.3328,
+    0.5718
+   ],
+   "rightWrist": [
+    0.3328,
+    0.5718
+   ],
+   "root": [
+    0.4275,
+    0.4437
+   ],
+   "leftHip": [
+    0.4443,
+    0.4447
+   ],
+   "rightHip": [
+    0.4443,
+    0.4447
+   ],
+   "leftKnee": [
+    0.6843,
+    0.4589
+   ],
+   "rightKnee": [
+    0.6843,
+    0.4589
+   ],
+   "leftAnkle": [
+    0.93,
+    0.4734
+   ],
+   "rightAnkle": [
+    0.93,
+    0.4734
+   ]
+  },
+  "aspect": 1.0,
+  "view": "side",
+  "source": "blender/yoga_poses.py (wooden mannequin, 16.11.2026)"
+ },
+ {
+  "id": "upward-dog",
+  "name": "Upward Dog",
+  "speak": "Upward dog, Urdhva Mukha Svanasana",
+  "cues": [
+   "Arms straight, shoulders over the wrists.",
+   "Chest forward and up, thighs off the floor.",
+   "Tops of the feet press the floor, look forward."
+  ],
+  "joints": {
+   "nose": [
+    0.07,
+    0.2799
+   ],
+   "neck": [
+    0.1567,
+    0.3756
+   ],
+   "leftShoulder": [
+    0.1649,
+    0.3853
+   ],
+   "rightShoulder": [
+    0.1649,
+    0.3853
+   ],
+   "leftElbow": [
+    0.1719,
+    0.5622
+   ],
+   "rightElbow": [
+    0.1719,
+    0.5622
+   ],
+   "leftWrist": [
+    0.1782,
+    0.7201
+   ],
+   "rightWrist": [
+    0.1782,
+    0.7201
+   ],
+   "root": [
+    0.388,
+    0.5412
+   ],
+   "leftHip": [
+    0.4062,
+    0.5464
+   ],
+   "rightHip": [
+    0.4062,
+    0.5464
+   ],
+   "leftKnee": [
+    0.6651,
+    0.6294
+   ],
+   "rightKnee": [
+    0.6651,
+    0.6294
+   ],
+   "leftAnkle": [
+    0.93,
+    0.7144
+   ],
+   "rightAnkle": [
+    0.93,
+    0.7144
+   ]
+  },
+  "aspect": 1.0,
+  "view": "side",
+  "source": "blender/yoga_poses.py (wooden mannequin, 16.11.2026)"
  }
 ]

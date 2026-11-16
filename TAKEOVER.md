@@ -116,3 +116,17 @@ App hook (for the app worker, not built into the app by this worker): a CLEAN bu
 `/usr/bin/python3 <repo>/cleanup/skelclean.py <rec>.skel.json -o <rec>.clean.skel.json --preset <preset> --report`
 (exit 0 = ok; stdout has a one-line summary; the report is <rec>.clean.report.md) and then renders <rec>.clean.skel.json.
 Presets for a picker: gentle, standard (default), strong, yoga-hold, dance. Runs in about 1.3 s for a 30 s clip (M1 Pro).
+
+## Wyoga poses as still pictures (blender/yoga_poses.py, 16.11.2026)
+
+Marko, 16.11.2026: "for the skeleton make all the Svemir yoga poses, skeleton needs to do in static way, not animation, make gallery
+in my Google photos and then we're going to share it with Svemir".
+`Blender -b --factory-startup -P blender/yoga_poses.py -- --out DIR [--only id,..] [--size 2048] [--samples 128] [--json data/poses.json]`
+renders the wooden mannequin in the Wyoga poses (wyoga.app: Upward Salute, Down Dog, Warrior II, Tree, and its Sun Salutation of six:
+Upward Salute, Forward Fold, Plank, Chaturanga, Upward Dog, Down Dog), 2048 square JPEG q90, EEVEE 128 samples with ray tracing, no text
+(names in the file names: "06 Sun Salutation 2 - Forward Fold - Uttanasana (side).jpg"). Standing poses front + 3/4, floor poses side + 3/4.
+Each pose is built from the mannequin's own bone lengths: torso directions, two-bone IK, explicit palm/sole frames (palms flat, toes
+tucked in Plank/Chaturanga, tops of the feet down in Upward Dog). Poses with hands and feet on the floor solve one angle by bisection
+until both touch (measured on the wood), then the lowest point goes on the floor. The body turns, not the camera, so the camera always
+looks into the cyclorama. The stills: docs/poses/ (20 files, 2.3 MB). `--json` appended down-dog, forward-fold, plank, chaturanga,
+upward-dog (2D side-view keypoints, cues) to data/poses.json; existing ids are never touched.

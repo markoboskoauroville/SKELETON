@@ -26,3 +26,7 @@
     makes the LLM route safe. Prompts must tell Claude to fix listed swaps first.
 13. scribe `--out` takes a FOLDER (it wrote docs/reference/<id>.md/<id>.md and another worker's commit picked it up);
     give it a directory and rename afterwards.
+10. 16.11.2026: a cyclorama is finite: turn the body to the view, keep the camera looking into the curve, or the side views show its edge.
+    Forward Fold reads only from the side turned a little to the front; from the pure side the near arm hides the hanging torso.
+11. 16.11.2026: a BiDi helper that dies without `session.end` blocks Marko's Firefox ("Maximum number of active sessions") until
+    Firefox restarts. Every BiDi script ends the session in `finally`, also on an error.
