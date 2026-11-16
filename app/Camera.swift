@@ -3,6 +3,7 @@
 import AVFoundation
 import Vision
 import CoreImage
+import QuartzCore
 
 final class Tracker {
     private struct T { var pose: Pose }
@@ -152,9 +153,36 @@ final class Pipeline {
     private let lock = NSLock()
     private var busy = false
 
+    /// Quarter turns clockwise that stand this camera's picture upright (0...3), set per camera (MainView remembers it).
+    /// Vision is told the orientation (no pixels moved for it); the picture is turned by Core Image.
+    var turns = 0
+    /// Marko, 16.11.2026: "I am upside down ... detect upside down picture and simply rotate them." For the first 15 s of a
+    /// camera, while no person is seen upright, the other three turns are tried every few analysed frames; one that finds an
+    /// upright body 3 times is taken and told through [onAutoTurns]. Once a person is seen upright it stops for good (a
+    /// headstand later never turns the camera). Off when the turn was set by hand.
+    var autoOrient = true
+    var onAutoTurns: ((Int) -> Void)?
+    private var autoUntil = 0.0
+    private var autoVotes: [Int: Int] = [:]
+    private var autoProbe = 0
+    private static let ci = CIContext(options: [.cacheIntermediates: false])
+
+    static func orientation(_ turns: Int) -> CGImagePropertyOrientation {
+        switch (turns % 4 + 4) % 4 { case 1: return .right; case 2: return .down; case 3: return .left; default: return .up }
+    }
+
+    /// A person standing up in the picture (y grows downward): the neck or nose clearly above the hips.
+    static func upright(_ poses: [Pose]) -> Bool {
+        poses.contains { p in
+            guard p.j.count >= 6, let hip = p.hipCentre, let top = p.j[.neck] ?? p.j[.nose] else { return false }
+            return top.y < hip.y - 0.05
+        }
+    }
+
     func attach(_ s: FrameSource) {
         detach()
         source = s
+        autoUntil = CACurrentMediaTime() + 15; autoVotes = [:]; autoProbe = 0
         s.onPixelBuffer = { [weak self] pb, t in self?.handle(pb, t) }
     }
 
@@ -172,8 +200,18 @@ final class Pipeline {
     }
 
     private func process(_ pb: CVPixelBuffer, _ t: Double) {
-        guard let img = cgImage(from: pb) else { return }
-        let w = CGFloat(CVPixelBufferGetWidth(pb)), h = CGFloat(CVPixelBufferGetHeight(pb))
+        let turn = turns
+        let o = Pipeline.orientation(turn)
+        var img: CGImage
+        var w = CGFloat(CVPixelBufferGetWidth(pb)), h = CGFloat(CVPixelBufferGetHeight(pb))
+        if turn % 4 == 0 {
+            guard let c = cgImage(from: pb) else { return }
+            img = c
+        } else {
+            let ci = CIImage(cvPixelBuffer: pb).oriented(o)
+            guard let c = Pipeline.ci.createCGImage(ci, from: ci.extent) else { return }
+            img = c; w = ci.extent.width; h = ci.extent.height
+        }
         counter += 1
         if analysisEvery > 1 && counter % analysisEvery != 0 {
             let f = Frame(image: img, size: CGSize(width: w, height: h), poses: lastPoses, raw: [], t: t, lum: 0, v3: nil, analyzed: false)
@@ -185,14 +223,42 @@ final class Pipeline {
         var reqs: [VNRequest] = [req]
         var req3: VNDetectHumanBodyPose3DRequest?
         if want3D { let r = VNDetectHumanBodyPose3DRequest(); req3 = r; reqs.append(r) }
-        try? VNImageRequestHandler(cvPixelBuffer: pb, orientation: .up, options: [:]).perform(reqs)
+        try? VNImageRequestHandler(cvPixelBuffer: pb, orientation: o, options: [:]).perform(reqs)
         let raw = extractPoses(req.results ?? [], aspect: w / h)
+        if autoOrient && autoUntil > 0 { autoCheck(pb, raw, turn) }
         let poses = tracker.update(raw)
         lastPoses = poses
         let v3 = req3?.results?.first.map { extract3D($0) }
         let f = Frame(image: img, size: CGSize(width: w, height: h), poses: poses, raw: raw, t: t, lum: meanLuminance(pb), v3: v3)
         let cb = onFrame
         DispatchQueue.main.async { cb?(f) }
+    }
+}
+
+extension Pipeline {
+    /// The start-up orientation check (see [autoOrient]); runs on the pipeline's queue.
+    fileprivate func autoCheck(_ pb: CVPixelBuffer, _ raw: [Pose], _ turn: Int) {
+        if Pipeline.upright(raw) { autoUntil = 0; return }               // upright as it is: never again for this camera
+        if CACurrentMediaTime() > autoUntil { autoUntil = 0; return }
+        autoProbe += 1
+        guard autoProbe % 6 == 0 else { return }                          // a trial every 6th analysed frame: light on the Mac
+        for k in 1...3 {
+            let cand = (turn + k) % 4
+            let o = Pipeline.orientation(cand)
+            let r = VNDetectHumanBodyPoseRequest()
+            try? VNImageRequestHandler(cvPixelBuffer: pb, orientation: o, options: [:]).perform([r])
+            let w = CGFloat(CVPixelBufferGetWidth(pb)), h = CGFloat(CVPixelBufferGetHeight(pb))
+            let aspect = cand % 2 == 1 ? h / w : w / h
+            if Pipeline.upright(extractPoses(r.results ?? [], aspect: aspect)) {
+                autoVotes[cand, default: 0] += 1
+                if autoVotes[cand]! >= 3 {
+                    turns = cand; autoUntil = 0
+                    let cb = onAutoTurns
+                    DispatchQueue.main.async { cb?(cand) }
+                }
+                return
+            }
+        }
     }
 }
 

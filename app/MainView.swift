@@ -511,9 +511,10 @@ final class MainView: NSView, NSMenuDelegate {
             }
             if asked == nil, slots[k].phone != nil { continue }   // a running phone off adb for a moment: left running
             // the phones are not scanned yet: a phone asked for or remembered is waited for
-            if !PhoneSource.scannedOnce && PhoneSource.adbPresent {
-                let wantsPhone = saved?.hasPrefix("manualcamera:") == true && asked == nil
-                let askedNoAV = asked.map { a in !devices.contains { $0.localizedName.lowercased().contains(a.lowercased()) } } ?? false
+            // a phone asked for by name is waited for (wireless adb may be reconnecting), never replaced by another camera
+            if PhoneSource.adbPresent {
+                let wantsPhone = !PhoneSource.scannedOnce && saved?.hasPrefix("manualcamera:") == true && asked == nil
+                let askedNoAV = asked.map { a in !devices.contains { $0.localizedName.lowercased().contains(a.lowercased()) || $0.uniqueID.lowercased() == a.lowercased() } } ?? false
                 if wantsPhone || askedNoAV { waitForPhones = true; continue }
             }
             var pick: AVCaptureDevice?
@@ -553,6 +554,42 @@ final class MainView: NSView, NSMenuDelegate {
             guard let self = self, let s = s else { return }
             self.frame(s, f)
         }
+        // the picture's turn, per camera (Marko, 16.11.2026: "I am upside down"): right click on the picture
+        let m = NSMenu()
+        for (i, t) in ["ROTATE 0°", "ROTATE 90°", "ROTATE 180°", "ROTATE 270°"].enumerated() {
+            let it = NSMenuItem(title: t, action: #selector(rotateChosen(_:)), keyEquivalent: ""); it.target = self; it.tag = i
+            it.representedObject = s; m.addItem(it)
+        }
+        m.addItem(.separator())
+        let a = NSMenuItem(title: "ROTATE AUTOMATICALLY AT START", action: #selector(rotateChosen(_:)), keyEquivalent: "")
+        a.target = self; a.tag = -1; a.representedObject = s; m.addItem(a)
+        s.stage.menu = m
+        s.pipe.onAutoTurns = { [weak self, weak s] t in
+            guard let self = self, let s = s, !s.uid.isEmpty else { return }
+            self.defaults.set(t, forKey: "turns." + s.uid)
+            s.size = .zero; s.hist = []
+            s.stage.toast("PICTURE TURNED \(t * 90)° (IT WAS NOT UPRIGHT) · RIGHT CLICK TO CHANGE")
+        }
+    }
+
+    @objc func rotateChosen(_ it: NSMenuItem) {
+        guard let s = it.representedObject as? Slot, !s.uid.isEmpty else { return }
+        if it.tag < 0 {
+            defaults.removeObject(forKey: "turns." + s.uid); defaults.removeObject(forKey: "turns.manual." + s.uid)
+            s.pipe.turns = 0; s.pipe.autoOrient = true
+            s.stage.toast("ROTATION: AUTOMATIC AT THE NEXT START")
+        } else {
+            defaults.set(it.tag, forKey: "turns." + s.uid); defaults.set(true, forKey: "turns.manual." + s.uid)
+            s.pipe.turns = it.tag; s.pipe.autoOrient = false
+            s.stage.toast("ROTATED \(it.tag * 90)°")
+        }
+        s.size = .zero; s.hist = []
+    }
+
+    /// The camera's remembered turn (right click) before its first frame.
+    func applyTurns(_ s: Slot) {
+        s.pipe.turns = defaults.integer(forKey: "turns." + s.uid)
+        s.pipe.autoOrient = !defaults.bool(forKey: "turns.manual." + s.uid)
     }
 
     func select(_ d: AVCaptureDevice, slot k: Int) {
@@ -568,6 +605,7 @@ final class MainView: NSView, NSMenuDelegate {
         loadCalibration(s)
         guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized else { return }
         let src = AVCameraSource(device: d)
+        applyTurns(s)
         s.pipe.attach(src)
         src.start { [weak self, weak s] ok in
             guard let self = self, let s = s else { return }
@@ -594,6 +632,7 @@ final class MainView: NSView, NSMenuDelegate {
         s.stage.cameraName = ph.label
         s.size = .zero; s.hist = []; s.sizeWarned = false
         s.formatText = "starting the \(ph.short)..."
+        applyTurns(s)
         s.pipe.attach(src)
         src.onError = { [weak s] t in s?.stage.toast(t) }
         src.onStatusText = { [weak self, weak s, weak src] t in
