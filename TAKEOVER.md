@@ -21,6 +21,35 @@ Files: app/Model.swift (joints, limbs, levels, compare), Camera.swift (capture +
 (controls, session), Voice.swift, Store.swift, Updater.swift (kits/mac-updater, asks at start), App.swift, main.swift.
 Command line: `open -a "Skeleton (Mantra)" --args --camera ILCE-7M5` (at launch only; quit it first to switch from outside).
 
+
+## Phones as cameras: Manual Camera over USB / Wi-Fi (app/PhoneSource.swift, 16.11.2026)
+
+Marko: "if I connect via USB my Pixel phone, this app needs to ... start the camera itself, adjust the settings of this phone";
+"four cameras connected at the same time"; "If ADB is there and camera not working, it needs to kick it in automatically."
+- Every phone with Mantra Manual Camera v221+ on adb is its own source "Manual Camera (<phone>, USB|Wi-Fi)" (one entry per
+  hardware serial). A background scan (4 s) also `adb connect`s his wireless phones (UserDefaults phone.adbAddresses: Pixel
+  100.70.23.53:5555, Nothing 10.239.153.128:5555, plus every one seen) and mDNS `_adb-tls-connect` phones, only while
+  `PhoneSource.autoStart` (UserDefaults phone.autostart, default on; the UI switch AUTO START PHONE CAMERAS (ADB)).
+- Start: screen woken, a lock without PIN dismissed (a PIN: "UNLOCK THE PHONE", retried), `am start ... --es mode skeleton` only
+  when its status is not already SKELETON (every start reopens the lens). Route chosen fresh: USB = `adb forward tcp:0` to
+  48100 (Mantra Link) and 48102 (status JSON); else the phone's addresses (wlan, rndis/ncm tethering, Tailscale) by fastest
+  status answer; last, adb's own tunnel. Bit rate 40 Mbit/s on USB / USB network, 12 over Wi-Fi (phone.mbps, phone.mbps.wifi).
+- MODE 2 = the hardware HEVC stream untouched, VideoToolbox to BGRA. Times: the phone's sensor clock mapped to the host clock
+  by an NTP-style exchange over the status (min RTT of 20), so `t` is when the picture was taken; latency measured per second.
+- Intrinsics from the phone (LENS_INTRINSIC_CALIBRATION moved into the stream's pixels, k = 0 as the ISP undistorts) are used
+  until the board calibration exists. uniqueID = manualcamera:<hw serial>:<lens>:<width>.
+- Watchdog: no frame (or a black picture) for 3 s = reconnect, from the 2nd kick force-stop and start, backoff to 30 s.
+  Every kick in ~/Library/Logs/Skeleton/phones.log.
+- Orientation: Manual Camera v222 turns the stream by the phone's physical orientation; Skeleton also has a turn per camera
+  (right click on the picture: ROTATE 0/90/180/270 or AUTOMATICALLY, remembered as turns.<uid>) and in the first 15 s turns a
+  camera by itself when the body is found upright only in another turn (Pipeline.autoOrient, stops once a person is upright).
+- Measured 16.11.2026 (Sony + Pixel + Nothing at once, v13): cold start with both cameras force-stopped: Nothing 6.0 s,
+  Pixel 12.4 s; Nothing USB 2.0: 29.5 fps, 41 Mbit/s, 129 ms; Pixel adb tunnel: 29.0 fps, 12 Mbit/s, 146 ms; Skeleton 43 % of
+  one core, Mac 62 % idle. Pixel over its own Wi-Fi from a script: 30 fps, 12 Mbit/s, ~123 ms (40 Mbit/s: 18-22 fps, 0.5-0.9 s).
+- Open: the Pixel's direct Wi-Fi from the app does not answer (curl from Terminal does): likely Little Snitch holding the
+  newly signed app's connections; Marko allows "Skeleton (Mantra)" for the local network, then Wi-Fi is used instead of the
+  tunnel. Not yet done: the on-screen flash test (glass to glass) and stills against Iriun (both need the phone pointed by hand).
+
 ## Blender part: Render Mannequin (blender/, 16.11.2026)
 
 Marko, 16.11.2026: "build in my blender ... a mannequin. Classic mannequin ... and also build the skeleton inside of him and then

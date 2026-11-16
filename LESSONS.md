@@ -30,3 +30,9 @@
     Forward Fold reads only from the side turned a little to the front; from the pure side the near arm hides the hanging torso.
 11. 16.11.2026: a BiDi helper that dies without `session.end` blocks Marko's Firefox ("Maximum number of active sessions") until
     Firefox restarts. Every BiDi script ends the session in `finally`, also on an error.
+12. 16.11.2026: this folder is shared by two sessions at once; the other one commits everything (`git add -A`), so a half-done
+    edit of yours can be released in its version. Commit your own files at once, pull --rebase before every push.
+13. 16.11.2026: a phone's address that answers curl from Terminal may not answer the app: Little Snitch holds a newly signed
+    app's connections (its prompt times out to Deny). 127.0.0.1 (adb forward) is not held, so adb's tunnel is the last route.
+14. 16.11.2026: never toggle USB tethering on the Nothing (it carries the Mac's internet); switching it re-enumerates USB and the
+    adb transport changes: the source must find its phone again by hardware serial, never by the adb transport.
