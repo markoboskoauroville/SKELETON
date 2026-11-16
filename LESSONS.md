@@ -36,3 +36,7 @@
     app's connections (its prompt times out to Deny). 127.0.0.1 (adb forward) is not held, so adb's tunnel is the last route.
 14. 16.11.2026: never toggle USB tethering on the Nothing (it carries the Mac's internet); switching it re-enumerates USB and the
     adb transport changes: the source must find its phone again by hardware serial, never by the adb transport.
+6. 16.11.2026: Calibration without OpenCV works in pure Swift: a circle grid (not a checkerboard) because blobs can be found on a strongly distorted picture without a corner detector; Kannala-Brandt fisheye lens model with a multi-start focal guess; unit tests on synthetic data run in GitHub Actions before every build (app/Calib, tests/main.swift): lens 0.42 px, stereo 0.46 px, triangulation exact without noise. A board drawn in a test with y up is a mirrored board, and the detector rightly refuses it.
+7. 16.11.2026: With three or four cameras Vision runs on every second frame (Pipeline.analysisEvery) while the picture is shown at full rate; four live feeds (Sony, FaceTime, two virtual cameras) ran at 21 to 42 fps display and about 65 percent of one core.
+8. 16.11.2026: Text that is drawn into a pane must wrap inside the pane (StageView.wrappedText, infoHeight); half-width panes cut every long sentence otherwise.
+9. 16.11.2026: A source that gives black or no frames gets no tile and is listed as text (RETRY / CONNECT) and is started again by itself every 10 s; its tile returns after half a second of a real picture.
