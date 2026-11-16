@@ -30,7 +30,7 @@ final class SwitchRow: NSStackView {
 final class Slot {
     let pipe = Pipeline()
     let stage = StageView()
-    var device: AVCaptureDevice? { slots[0].device }
+    var device: AVCaptureDevice?
     var intr: Intrinsics?
     var intrInfo: StoredIntrinsics?
     var extr: StoredExtrinsics?          // pose relative to camera 1 (nil for camera 1)
@@ -69,7 +69,7 @@ final class MainView: NSView, NSMenuDelegate {
     let calibrateButton = NSButton()
     let multiRow = NSStackView()
     var devices: [AVCaptureDevice] = []
-    var device: AVCaptureDevice?
+    var device: AVCaptureDevice? { slots[0].device }
     let defaults = UserDefaults.standard
 
     let cameraPopup = NSPopUpButton()
