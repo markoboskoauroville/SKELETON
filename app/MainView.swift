@@ -45,24 +45,31 @@ final class Slot {
     var lastDetect = 0.0
     var sig: [(t: Double, lum: Double, motion: Double)] = []
     var sizeWarned = false
+    var use = true                       // the "use this camera" switch (camera 1 is the reference and always used)
+    var calViews: [[V2]] = []
+    var lastCap: [V2]?
+    var solving = false
     var phone: PhoneSource?              // "Manual Camera (Pixel, USB)" (PhoneSource.swift) instead of an AVCapture device
     var uid: String { device?.uniqueID ?? phone?.uniqueID ?? "" }
 }
 
-enum CalStep: Equatable { case idle, intrinsics(Int), pair(Int), measure }
+enum CalStep: Equatable { case idle, intrinsics, pair, measure }
 
 final class MainView: NSView, NSMenuDelegate {
     override var isFlipped: Bool { true }
     var slots: [Slot] = [Slot()]
     var stage: StageView { slots[0].stage }
     let controls = NSView()
-    let camSeg = NSSegmentedControl(labels: ["1 CAMERA", "2 CAMERAS", "3 CAMERAS"], trackingMode: .selectOne, target: nil, action: nil)
+    let camSeg = NSSegmentedControl(labels: ["1", "2", "3", "4"], trackingMode: .selectOne, target: nil, action: nil)
     let camBPopup = NSPopUpButton()
     let camCPopup = NSPopUpButton()
+    let camDPopup = NSPopUpButton()
+    var camPopups: [NSPopUpButton] { [cameraPopup, camBPopup, camCPopup, camDPopup] }
+    var useSw: [SwitchRow] = []
+    var pairData: [String: [([V2], [V2])]] = [:]
+    var pairLast: [String: [V2]] = [:]
+    var positioned: Set<Int> = [0]
     var calStep = CalStep.idle
-    var calViews: [[V2]] = []
-    var calPairs: [([V2], [V2])] = []
-    var lastCap: [V2]?
     var measureStart = 0.0
     var lastTri: TriResult?
     var a3 = false
@@ -130,7 +137,7 @@ final class MainView: NSView, NSMenuDelegate {
             return e
         }
         checkPermission(request: true)
-        let n0 = max(1, min(3, defaults.integer(forKey: "camcount")))
+        let n0 = max(1, min(4, defaults.integer(forKey: "camcount")))
         reloadDevices()
         if n0 > 1 { setCameraCount(n0) }
     }
@@ -214,21 +221,34 @@ final class MainView: NSView, NSMenuDelegate {
         setTitle(renderButton, "RENDER MANNEQUIN")
         let rl = NSTextField(labelWithString: "RECORDINGS"); rl.font = MONO; rl.textColor = .white
         let r4 = row([rl, recPopup, renderButton])
-        camSeg.selectedSegment = max(0, min(2, defaults.integer(forKey: "camcount") - 1))
+        camSeg.selectedSegment = max(0, min(3, defaults.integer(forKey: "camcount") - 1))
         camSeg.target = self; camSeg.action = #selector(camCountChanged)
         camSeg.setAccessibilityLabel("CAMERAS")
-        for p in [camBPopup, camCPopup] {
-            p.widthAnchor.constraint(equalToConstant: 190).isActive = true
+        for p in [camBPopup, camCPopup, camDPopup] {
+            p.widthAnchor.constraint(equalToConstant: 170).isActive = true
             p.menu?.delegate = self
         }
         camBPopup.target = self; camBPopup.action = #selector(camBChosen); camBPopup.setAccessibilityLabel("CAMERA 2")
         camCPopup.target = self; camCPopup.action = #selector(camCChosen); camCPopup.setAccessibilityLabel("CAMERA 3")
-        let r5 = row([camSeg, camBPopup, camCPopup])
+        camDPopup.target = self; camDPopup.action = #selector(camDChosen); camDPopup.setAccessibilityLabel("CAMERA 4")
+        let camLabel = NSTextField(labelWithString: "CAMERAS"); camLabel.font = MONO; camLabel.textColor = .white
+        let r5 = row([camLabel, camSeg, camBPopup, camCPopup, camDPopup])
         calibrateButton.isBordered = false; calibrateButton.target = self; calibrateButton.action = #selector(calibratePressed)
         setTitle(calibrateButton, "CALIBRATE")
         a3 = defaults.bool(forKey: "boardA3")
         let r6 = row([calibrateButton, button("BOARD A4", #selector(boardA4)), button("BOARD A3", #selector(boardA3)), button("MEASURE DELAY", #selector(measureDelay))])
-        multiRow.setViews([r6], in: .leading)
+        for k in 1..<4 {
+            let sw = SwitchRow("USE CAMERA \(k + 1)", on: true)
+            sw.onChange = { [weak self] on in
+                guard let self = self, k < self.slots.count else { return }
+                self.slots[k].use = on
+                self.defaults.set(on, forKey: "use." + CalibStore.safe(self.slots[k].uid))
+                self.setTitle(self.calibrateButton, self.calibrated ? "RECALIBRATE" : "CALIBRATE")
+            }
+            useSw.append(sw)
+        }
+        let rUse = row(useSw)
+        multiRow.setViews([r6, rUse], in: .leading)
         multiRow.orientation = .vertical
         multiRow.isHidden = true
         presetPopup.addItems(withTitles: ["gentle", "standard", "strong", "yoga-hold", "dance"])
@@ -269,8 +289,14 @@ final class MainView: NSView, NSMenuDelegate {
 
     override func layout() {
         super.layout()
-        let n = CGFloat(slots.count), w = bounds.width / n
-        for (i, s) in slots.enumerated() { s.stage.frame = NSRect(x: CGFloat(i) * w, y: 0, width: w, height: bounds.height) }
+        let n = slots.count
+        if n == 4 {                                           // a grid of four
+            let w = bounds.width / 2, h = bounds.height / 2
+            for (i, s) in slots.enumerated() { s.stage.frame = NSRect(x: CGFloat(i % 2) * w, y: CGFloat(i / 2) * h, width: w, height: h) }
+        } else {
+            let w = bounds.width / CGFloat(n)
+            for (i, s) in slots.enumerated() { s.stage.frame = NSRect(x: CGFloat(i) * w, y: 0, width: w, height: bounds.height) }
+        }
         let h = max(60, controls.fittingSize.height)
         controls.frame = NSRect(x: 0, y: 0, width: bounds.width, height: h)
     }
@@ -455,7 +481,7 @@ final class MainView: NSView, NSMenuDelegate {
 
     func reloadDevices() {
         devices = AVCameraSource.devices()
-        for p in [cameraPopup, camBPopup, camCPopup] {
+        for p in camPopups {
             p.removeAllItems()
             for d in devices { p.addItem(withTitle: d.localizedName) }
             if PhoneSource.adbPresent { p.addItem(withTitle: PhoneSource.displayName) }   // index devices.count
@@ -463,7 +489,7 @@ final class MainView: NSView, NSMenuDelegate {
         if devices.isEmpty && !PhoneSource.adbPresent { cameraPopup.addItem(withTitle: "NO CAMERA"); stage.cameraName = ""; return }
         var taken: [String] = []
         for k in 0..<slots.count {
-            let popup = [cameraPopup, camBPopup, camCPopup][k]
+            let popup = camPopups[k]
             // the phone: asked for by name (--camera pixel), kept while it runs, or remembered
             let asked = k < pendingCams.count && !pendingCams[k].isEmpty ? pendingCams[k] : (k == 0 ? pendingCamera : nil)
             let phoneAsked = asked.map { PhoneSource.matches($0) } ?? false
@@ -495,6 +521,7 @@ final class MainView: NSView, NSMenuDelegate {
     @objc func cameraChosen() { chooseCamera(0, cameraPopup) }
     @objc func camBChosen() { chooseCamera(1, camBPopup) }
     @objc func camCChosen() { chooseCamera(2, camCPopup) }
+    @objc func camDChosen() { chooseCamera(3, camDPopup) }
 
     func chooseCamera(_ k: Int, _ popup: NSPopUpButton) {
         let i = popup.indexOfSelectedItem

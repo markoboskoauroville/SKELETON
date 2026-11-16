@@ -23,6 +23,9 @@ final class StageView: NSView {
     var calibPoints: [V2]?               // the board points found in the picture, pixels
     var extraInfo: String?               // e.g. SYNC +180 MS
     var quality: Int?                    // tracking quality 0...100 (multi-camera)
+    var viewQuality: Int?                // this camera's share of it
+    var analysisFps = 0
+    private var aFrames = 0
     var fps = 0
     var band: (title: String, text: String)?
     var onAchieved: (() -> Void)?
@@ -74,10 +77,25 @@ final class StageView: NSView {
                 if !fired { fired = true; onAchieved?() }
             }
         } else { greenSince = nil; matched = false }
+        aFrames += 1
+        tickFps()
+        needsDisplay = true
+    }
+
+    /// A frame whose poses are not new: the picture moves, the skeleton stays where the last analysis put it.
+    func setImage(_ image: CGImage, size: CGSize) {
+        self.image = image; imgSize = size
+        tickFps()
+        needsDisplay = true
+    }
+
+    private func tickFps() {
         frames += 1
         let el = Date().timeIntervalSince(fpsStart)
-        if el >= 1 { fps = Int((Double(frames) / el).rounded()); frames = 0; fpsStart = Date() }
-        needsDisplay = true
+        if el >= 1 {
+            fps = Int((Double(frames) / el).rounded()); analysisFps = Int((Double(aFrames) / el).rounded())
+            frames = 0; aFrames = 0; fpsStart = Date()
+        }
     }
 
     // MARK: geometry
@@ -123,9 +141,12 @@ final class StageView: NSView {
         drawInfo(area, rect)
         if !isSecondary { drawRing(area); drawBand() }
         if let w = wizard { text(w, at: CGPoint(x: area.midX, y: area.maxY - 100), size: 13, color: .white, center: true, back: true) }
-        if let q = quality {
+        var qy = area.maxY - infoHeight() - 22
+        for (label, v) in [("TRACKING QUALITY", quality), ("THIS CAMERA", viewQuality)] {
+            guard let q = v else { continue }
             let c: NSColor = q >= 75 ? StageView.green : (q >= 45 ? StageView.yellow : StageView.red)
-            text("TRACKING QUALITY \(q)", at: CGPoint(x: 14, y: area.maxY - 44), size: 11, color: c, center: false, back: true)
+            text("\(label) \(q)", at: CGPoint(x: 14, y: qy), size: 11, color: c, center: false, back: true)
+            qy -= 20
         }
         if let r = recText {
             text("● REC  " + r, at: CGPoint(x: area.midX, y: area.maxY - 60), size: 16, color: StageView.red, center: true, back: true)
@@ -204,13 +225,29 @@ final class StageView: NSView {
         }
     }
 
+    private var infoString: String {
+        "\(cameraName.isEmpty ? "NO CAMERA" : cameraName)  ·  \(fps) fps" + (analysisFps > 0 && analysisFps < fps ? " (AI \(analysisFps))" : "") + (extraInfo.map { "  ·  " + $0 } ?? "")
+    }
+
+    private var infoAttrs: [NSAttributedString.Key: Any] {
+        [.font: NSFont.monospacedSystemFont(ofSize: 10, weight: .bold), .foregroundColor: NSColor.white.withAlphaComponent(0.75)]
+    }
+
+    /// The info text wraps inside the pane; this is the height it needs plus the margin.
+    func infoHeight() -> CGFloat {
+        let w = max(60, bounds.width - 28)
+        let r = (infoString as NSString).boundingRect(with: CGSize(width: w, height: 200), options: [.usesLineFragmentOrigin], attributes: infoAttrs)
+        return ceil(r.height) + 12
+    }
+
     private func drawInfo(_ area: CGRect, _ rect: CGRect) {
-        let info = "\(cameraName.isEmpty ? "NO CAMERA" : cameraName)  ·  \(fps) fps" + (extraInfo.map { "  ·  " + $0 } ?? "")
-        text(info, at: CGPoint(x: 14, y: area.maxY - 22), size: 11, color: .white.withAlphaComponent(0.7), center: false)
+        let h = infoHeight()
+        let r = CGRect(x: 14, y: area.maxY - h, width: max(60, bounds.width - 28), height: h)
+        (infoString as NSString).draw(in: r, withAttributes: infoAttrs)
         if isSecondary { return }
         if let t = target, let th = t.thumb {
             let w: CGFloat = 110, h = w * CGFloat(th.height) / CGFloat(th.width)
-            let r = CGRect(x: 14, y: area.maxY - 34 - h, width: w, height: h)
+            let r = CGRect(x: 14, y: area.maxY - infoHeight() - 84 - h, width: w, height: h)
             guard let ctx = NSGraphicsContext.current?.cgContext else { return }
             ctx.saveGState()
             ctx.translateBy(x: r.minX, y: r.maxY); ctx.scaleBy(x: 1, y: -1)
@@ -220,7 +257,7 @@ final class StageView: NSView {
             let b = NSBezierPath(rect: r); b.lineWidth = 1; b.stroke()
             text(t.name.uppercased(), at: CGPoint(x: r.minX, y: r.minY - 16), size: 10, color: .white.withAlphaComponent(0.8), center: false)
         } else if let t = target {
-            text("TARGET: " + t.name.uppercased(), at: CGPoint(x: 14, y: area.maxY - 40), size: 10, color: .white.withAlphaComponent(0.8), center: false)
+            text("TARGET: " + t.name.uppercased(), at: CGPoint(x: 14, y: area.maxY - infoHeight() - 80), size: 10, color: .white.withAlphaComponent(0.8), center: false)
         }
     }
 

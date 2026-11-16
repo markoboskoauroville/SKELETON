@@ -58,6 +58,7 @@ struct Frame {
     var t: Double            // host clock seconds
     var lum: Double
     var v3: V3Obs?
+    var analyzed = true      // false: only the picture is new, the poses are the last analysed ones (see Pipeline.analysisEvery)
 }
 
 /// An AVFoundation camera: built-in, USB/UVC (Sony ILCE-7M5), Continuity, Iriun, OBS/NDI virtual cameras.
@@ -141,6 +142,10 @@ final class AVCameraSource: NSObject, FrameSource, AVCaptureVideoDataOutputSampl
 final class Pipeline {
     var onFrame: ((Frame) -> Void)?
     var want3D = false
+    /// Vision runs on every n-th frame (n = 2 with three or four cameras, to keep the Mac up); the picture is shown at full rate.
+    var analysisEvery = 1
+    private var counter = 0
+    private var lastPoses: [Pose] = []
     private(set) var source: FrameSource?
     private let tracker = Tracker()
     private let q = DispatchQueue(label: "skeleton.pipeline")
@@ -169,6 +174,13 @@ final class Pipeline {
     private func process(_ pb: CVPixelBuffer, _ t: Double) {
         guard let img = cgImage(from: pb) else { return }
         let w = CGFloat(CVPixelBufferGetWidth(pb)), h = CGFloat(CVPixelBufferGetHeight(pb))
+        counter += 1
+        if analysisEvery > 1 && counter % analysisEvery != 0 {
+            let f = Frame(image: img, size: CGSize(width: w, height: h), poses: lastPoses, raw: [], t: t, lum: 0, v3: nil, analyzed: false)
+            let cb = onFrame
+            DispatchQueue.main.async { cb?(f) }
+            return
+        }
         let req = VNDetectHumanBodyPoseRequest()
         var reqs: [VNRequest] = [req]
         var req3: VNDetectHumanBodyPose3DRequest?
@@ -176,6 +188,7 @@ final class Pipeline {
         try? VNImageRequestHandler(cvPixelBuffer: pb, orientation: .up, options: [:]).perform(reqs)
         let raw = extractPoses(req.results ?? [], aspect: w / h)
         let poses = tracker.update(raw)
+        lastPoses = poses
         let v3 = req3?.results?.first.map { extract3D($0) }
         let f = Frame(image: img, size: CGSize(width: w, height: h), poses: poses, raw: raw, t: t, lum: meanLuminance(pb), v3: v3)
         let cb = onFrame

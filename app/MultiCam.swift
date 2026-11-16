@@ -7,6 +7,8 @@ extension MainView {
 
     func primaryPose(_ poses: [Pose]) -> Pose? { poses.max { ($0.torso ?? 0) < ($1.torso ?? 0) } }
 
+    var activeIdx: [Int] { slots.indices.filter { $0 == 0 || slots[$0].use } }
+
     func frame(_ s: Slot, _ f: Frame) {
         guard let idx = slots.firstIndex(where: { $0 === s }) else { return }
         s.size = f.size
@@ -14,6 +16,14 @@ extension MainView {
             s.intr = nil; s.extr = nil
             if !s.sizeWarned { s.sizeWarned = true; s.stage.toast("THE CALIBRATION IS FOR ANOTHER PICTURE SIZE: CALIBRATE AGAIN") }
         }
+        var parts: [String] = []
+        if !s.formatText.isEmpty { parts.append(s.formatText) }
+        if idx == 0 && slots.count > 1 {
+            parts.append("SYNC " + slots.dropFirst().map { String(format: "%+.0f", $0.offset * 1000) }.joined(separator: "/") + " MS")
+        }
+        s.stage.extraInfo = parts.isEmpty ? nil : parts.joined(separator: "  ·  ")
+        guard f.analyzed else { s.stage.setImage(f.image, size: f.size); return }
+
         let prim = primaryPose(f.poses)
         var motion = 0.0
         if let p = prim, let last = s.hist.last, let lp = last.pose, f.t > last.t {
@@ -30,16 +40,16 @@ extension MainView {
                 frontal = frontalPose(t.joints, aspect: f.size.width / f.size.height)
                 s.stage.quality = t.quality
             } else { s.stage.quality = nil }
-            let others = slots.dropFirst().map { String(format: "%+.0f", $0.offset * 1000) }
-            s.stage.extraInfo = slots.count > 1 ? "SYNC " + others.joined(separator: "/") + " MS" : nil
+            for (k, o) in slots.enumerated() { o.stage.viewQuality = lastTri?.viewQuality[k] }
         }
         s.stage.update(image: f.image, size: f.size, poses: f.poses, frontal: frontal)
         if idx == 0, let r = recorder { r.add(time: f.t, raw: f.raw, size: f.size, v3: f.v3, tri: lastTri) }
 
         switch calStep {
-        case .intrinsics(let i): if idx == i { detect(s, f) }
-        case .pair(let i): if idx == 0 || idx == i { detect(s, f) }
-        case .measure: if idx == 0 && measureStart == 0 { measureStart = f.t }
+        case .intrinsics: if (idx == 0 || s.use) && s.intr == nil { detect(s, f) }
+        case .pair: if idx == 0 || s.use { detect(s, f) }
+        case .measure:
+            if idx == 0 && measureStart == 0 { measureStart = f.t }
             if f.t - measureStart > 5, measureStart > 0 { finishMeasure() }
         case .idle: break
         }
@@ -49,53 +59,75 @@ extension MainView {
     // MARK: triangulation
 
     var calibrated: Bool {
-        guard slots.count > 1 else { return false }
-        for (i, s) in slots.enumerated() { if s.intr == nil { return false }; if i > 0 && s.extr == nil { return false } }
-        return true
+        let act = activeIdx
+        guard slots.count > 1, act.count > 1 else { return false }
+        return act.allSatisfy { slots[$0].intr != nil && ($0 == 0 || slots[$0].extr != nil) }
     }
 
+    /// All views that see a joint, confidence-weighted; a view that disagrees with the others is rejected for that joint.
     func triangulateFrame(_ f: Frame) -> TriResult? {
         guard calibrated, let KA = slots[0].intr, let pa = primaryPose(f.poses) else { return nil }
-        struct Partner { var K: Intrinsics; var e: Extrinsics; var pose: Pose; var H: Double }
-        var partners: [Partner] = []
-        for s in slots.dropFirst() {
+        struct View { var idx: Int; var K: Intrinsics; var R: M3; var t: V3; var pose: Pose; var H: Double }
+        var views: [View] = [View(idx: 0, K: KA, R: matrix_identity_double3x3, t: V3(0, 0, 0), pose: pa, H: Double(f.size.height))]
+        for (k, s) in slots.enumerated() where k > 0 && s.use {
             guard let K = s.intr, let e = s.extr?.E else { continue }
             let want = f.t + s.offset
             guard let h = s.hist.min(by: { abs($0.t - want) < abs($1.t - want) }), abs(h.t - want) < 0.05, let pb = h.pose else { continue }
-            partners.append(Partner(K: K, e: e, pose: pb, H: Double(h.size.height)))
+            views.append(View(idx: k, K: K, R: e.R, t: e.T, pose: pb, H: Double(h.size.height)))
         }
-        guard !partners.isEmpty else { return nil }
-        let HA = Double(f.size.height)
-        var joints: [Jt: V3] = [:]
-        var errs: [Double] = []
-        for jt in Jt.allCases {
+        guard views.count >= 2 else { return nil }
+        struct Obs { var view: Int; var px: V2; var w: Double }
+        func solve(_ o: [Obs]) -> (V3, [Double])? {
             var rays: [Ray] = []
-            var obs: [(Intrinsics, M3, V3, V2)] = []
-            if let p = pa.j[jt] {
-                let px = V2(Double(p.x) * HA, Double(p.y) * HA)
-                rays.append(Ray(xy: KA.unproject(px), R: matrix_identity_double3x3, t: V3(0, 0, 0), w: Double(pa.conf[jt] ?? 0.5)))
-                obs.append((KA, matrix_identity_double3x3, V3(0, 0, 0), px))
+            for ob in o { let v = views[ob.view]; rays.append(Ray(xy: v.K.unproject(ob.px), R: v.R, t: v.t, w: ob.w)) }
+            guard let X = triangulate(rays) else { return nil }
+            var errs: [Double] = []
+            for ob in o {
+                let v = views[ob.view]
+                if let q = v.K.project(v.R * X + v.t) { errs.append(length(q - ob.px)) } else { errs.append(100) }
             }
-            for pt in partners {
-                if let p = pt.pose.j[jt] {
-                    let px = V2(Double(p.x) * pt.H, Double(p.y) * pt.H)
-                    rays.append(Ray(xy: pt.K.unproject(px), R: pt.e.R, t: pt.e.T, w: Double(pt.pose.conf[jt] ?? 0.5)))
-                    obs.append((pt.K, pt.e.R, pt.e.T, px))
-                }
+            return (X, errs)
+        }
+        var joints: [Jt: V3] = [:]
+        var jointErrs: [Double] = []
+        var viewErr: [Int: [Double]] = [:]
+        for jt in Jt.allCases {
+            var cur: [Obs] = []
+            for (vi, v) in views.enumerated() {
+                if let p = v.pose.j[jt] { cur.append(Obs(view: vi, px: V2(Double(p.x) * v.H, Double(p.y) * v.H), w: Double(v.pose.conf[jt] ?? 0.5))) }
             }
-            guard rays.count >= 2, let X = triangulate(rays) else { continue }
-            var e = 0.0
-            for (K, R, t, px) in obs { if let q = K.project(R * X + t) { e += length(q - px) } else { e += 100 } }
-            e /= Double(obs.count)
-            if e < 12 { joints[jt] = X; errs.append(e) }
+            guard cur.count >= 2, let first = solve(cur) else { continue }
+            var X = first.0, e = first.1
+            var rejected: [Int] = []
+            for _ in 0..<2 where cur.count >= 3 {
+                let sorted = e.sorted()
+                let med = sorted[sorted.count / 2]
+                guard let worst = e.max(), worst > max(8, 3 * med), let wi = e.firstIndex(of: worst) else { break }
+                rejected.append(cur[wi].view)
+                cur.remove(at: wi)
+                guard let again = solve(cur) else { break }
+                X = again.0; e = again.1
+            }
+            let mean = e.reduce(0, +) / Double(e.count)
+            guard mean < 12 else { continue }
+            joints[jt] = X; jointErrs.append(mean)
+            for (i, ob) in cur.enumerated() { viewErr[views[ob.view].idx, default: []].append(e[i]) }
+            for vi in rejected { viewErr[views[vi].idx, default: []].append(20) }
         }
         guard joints.count >= 6 else { return nil }
-        let mean = errs.reduce(0, +) / Double(errs.count)
+        let mean = jointErrs.reduce(0, +) / Double(jointErrs.count)
         let cover = Double(joints.count) / Double(Jt.allCases.count)
         let errScore: Double = 1.0 - min(1.0, mean / 8.0)
         let qd: Double = 50.0 * cover + 50.0 * errScore
-        let q = Int(qd.rounded())
-        return TriResult(joints: joints, quality: max(0, min(100, q)), meanErrPx: mean, views: partners.count + 1)
+        var res = TriResult(joints: joints, quality: max(0, min(100, Int(qd.rounded()))), meanErrPx: mean, views: views.count)
+        for v in views {
+            let es = viewErr[v.idx] ?? []
+            guard !es.isEmpty else { res.viewQuality[v.idx] = 0; continue }
+            let me = es.reduce(0, +) / Double(es.count)
+            let part: Double = 70.0 * (1.0 - min(1.0, me / 8.0)) + 30.0 * min(1.0, Double(es.count) / 12.0)
+            res.viewQuality[v.idx] = max(0, min(100, Int(part.rounded())))
+        }
+        return res
     }
 
     // MARK: cameras count
@@ -119,9 +151,9 @@ extension MainView {
             addSubview(s.stage, positioned: .below, relativeTo: controls)
             slots.append(s)
         }
-        camBPopup.isHidden = n < 2
-        camCPopup.isHidden = n < 3
+        for k in 1..<4 { camPopups[k].isHidden = k >= n; useSw[k - 1].isHidden = k >= n }
         multiRow.isHidden = n < 2
+        for s in slots { s.pipe.analysisEvery = n >= 3 ? 2 : 1 }
         calStep = .idle
         setWizard(nil)
         needsLayout = true
@@ -131,8 +163,13 @@ extension MainView {
 
     func loadCalibration(_ s: Slot) {
         if let i = CalibStore.loadIntrinsics(s.uid) { s.intr = i.K; s.intrInfo = i } else { s.intr = nil; s.intrInfo = nil }
+        if let k = slots.firstIndex(where: { $0 === s }), k > 0 {
+            s.use = defaults.object(forKey: "use." + CalibStore.safe(s.uid)) as? Bool ?? true
+            useSw[k - 1].isOn = s.use
+            useSw[k - 1].label.stringValue = "USE " + String(s.stage.cameraName.uppercased().prefix(14))
+        }
         if let a = slots.first, s !== a {
-            if let e = CalibStore.loadExtrinsics(a: a.uid, b: s.uid) { s.extr = e } else { s.extr = nil }
+            s.extr = CalibStore.loadExtrinsics(a: a.uid, b: s.uid)
             s.offset = defaults.double(forKey: "offset." + CalibStore.safe(a.uid) + "." + CalibStore.safe(s.uid))
         } else if s === slots.first {
             for o in slots.dropFirst() {
@@ -165,34 +202,46 @@ extension MainView {
     func setWizard(_ t: String?) { for s in slots { s.stage.wizard = t; if t == nil { s.stage.calibPoints = nil } } }
 
     @objc func calibratePressed() {
-        guard slots.count > 1 else { stage.toast("CHOOSE 2 OR 3 CAMERAS FIRST"); return }
-        guard slots.allSatisfy({ $0.device != nil || $0.phone != nil }) else { return }
-        if calibrated {
-            for s in slots { s.intr = nil; s.extr = nil }
-        }
-        advanceCalibration()
+        guard slots.count > 1 else { stage.toast("CHOOSE 2 TO 4 CAMERAS FIRST"); return }
+        guard activeIdx.count > 1 else { stage.toast("SWITCH ON AT LEAST ONE MORE CAMERA"); return }
+        guard activeIdx.allSatisfy({ slots[$0].device != nil || slots[$0].phone != nil }) else { return }
+        if calibrated { for k in activeIdx { slots[k].intr = nil; slots[k].extr = nil } }
+        startCalibration()
     }
 
-    func advanceCalibration() {
-        for (i, s) in slots.enumerated() where s.intr == nil { startIntrinsics(i); return }
-        for i in 1..<slots.count where slots[i].extr == nil { startPair(i); return }
+    func resetBoardState() {
+        for s in slots { s.lastBoard = nil; s.prevBoard = nil; s.stable = 0 }
+    }
+
+    /// Intrinsics of every camera together (the board goes in front of each one), then the cameras are placed one by one
+    /// by pairs: a camera is positioned as soon as it shares 12 board views with a camera that is already positioned,
+    /// and its pose is chained into camera 1's frame.
+    func startCalibration() {
+        resetBoardState()
+        for s in slots { s.calViews = []; s.lastCap = nil; s.solving = false }
+        pairData = [:]; pairLast = [:]
+        positioned = [0]
+        for k in activeIdx where k > 0 && slots[k].extr != nil && slots[k].intr != nil { positioned.insert(k) }
+        if activeIdx.contains(where: { slots[$0].intr == nil }) {
+            calStep = .intrinsics
+            calibTick()
+        } else { startPairs() }
+    }
+
+    func startPairs() {
+        resetBoardState()
+        pairData = [:]; pairLast = [:]
+        if activeIdx.allSatisfy({ positioned.contains($0) }) { finishCalibration(); return }
+        calStep = .pair
+        calibTick()
+    }
+
+    func finishCalibration() {
         calStep = .idle
-        let e = slots.dropFirst().compactMap { $0.extr?.E.rms }.map { String(format: "%.2f", $0) }.joined(separator: " / ")
+        let e = activeIdx.filter { $0 > 0 }.compactMap { slots[$0].extr?.E.rms }.map { String(format: "%.2f", $0) }.joined(separator: " / ")
         setWizard("CALIBRATION READY: REPROJECTION " + e + " PX")
         wizardClear = Date().addingTimeInterval(8)
         setTitle(calibrateButton, "RECALIBRATE")
-    }
-
-    func startIntrinsics(_ i: Int) {
-        calStep = .intrinsics(i); calViews = []; lastCap = nil
-        for s in slots { s.lastBoard = nil; s.prevBoard = nil; s.stable = 0 }
-        setWizard("CAMERA \(i + 1) (\(slots[i].stage.cameraName)): HOLD THE BOARD IN VIEW, MOVE IT AROUND AND TILT IT: 0 OF 18")
-    }
-
-    func startPair(_ i: Int) {
-        calStep = .pair(i); calPairs = []; lastCap = nil
-        for s in slots { s.lastBoard = nil; s.prevBoard = nil; s.stable = 0 }
-        setWizard("CAMERAS 1 AND \(i + 1): HOLD THE BOARD SO BOTH SEE IT, KEEP IT STILL, MOVE IT: 0 OF 12  (BOARD \(a3 ? "A3" : "A4"))")
     }
 
     func detect(_ s: Slot, _ f: Frame) {
@@ -237,64 +286,92 @@ extension MainView {
 
     func calibTick() {
         switch calStep {
-        case .intrinsics(let i):
-            let s = slots[i]
-            guard let b = s.lastBoard, s.stable >= 2 else { return }
-            if let last = lastCap, !diverse(last, b.pts, width: Double(s.size.width)) { return }
-            calViews.append(b.pts); lastCap = b.pts
-            setWizard("CAMERA \(i + 1) (\(s.stage.cameraName)): MOVE AND TILT THE BOARD: \(calViews.count) OF 18")
-            if calViews.count >= 18 { solveIntrinsics(i) }
-        case .pair(let i):
-            let a = slots[0], s = slots[i]
-            guard let ba = a.lastBoard, let bs = s.lastBoard, a.stable >= 2, s.stable >= 2, abs(ba.t - bs.t) < 0.3 else { return }
-            if let last = lastCap, !diverse(last, ba.pts, width: Double(a.size.width)) { return }
-            calPairs.append((ba.pts, bs.pts)); lastCap = ba.pts
-            setWizard("CAMERAS 1 AND \(i + 1): MOVE THE BOARD, KEEP IT STILL FOR A MOMENT: \(calPairs.count) OF 12")
-            if calPairs.count >= 12 { solvePair(i) }
+        case .intrinsics:
+            var lines: [String] = []
+            for k in activeIdx {
+                let s = slots[k]
+                guard s.intr == nil else { continue }
+                lines.append("\(k + 1): \(s.calViews.count)/18")
+                guard !s.solving, let b = s.lastBoard, s.stable >= 2 else { continue }
+                if let last = s.lastCap, !diverse(last, b.pts, width: Double(s.size.width)) { continue }
+                s.calViews.append(b.pts); s.lastCap = b.pts
+                if s.calViews.count >= 18 { solveIntrinsics(k) }
+            }
+            if calStep == .intrinsics {
+                setWizard("MOVE THE BOARD IN FRONT OF EACH CAMERA, TILT IT, HOLD IT STILL A MOMENT. CAMERA " + lines.joined(separator: "   "))
+            }
+        case .pair:
+            var lines: [String] = []
+            for i in activeIdx where !positioned.contains(i) {
+                let s = slots[i]
+                var best = 0
+                for j in positioned.sorted() {
+                    let a = slots[j]
+                    let key = "\(j)-\(i)"
+                    best = max(best, pairData[key]?.count ?? 0)
+                    guard !s.solving, let ba = a.lastBoard, let bs = s.lastBoard, a.stable >= 2, s.stable >= 2, abs(ba.t - bs.t) < 0.3 else { continue }
+                    if let last = pairLast[key], !diverse(last, ba.pts, width: Double(a.size.width)) { continue }
+                    pairData[key, default: []].append((ba.pts, bs.pts)); pairLast[key] = ba.pts
+                    best = max(best, pairData[key]!.count)
+                    if pairData[key]!.count >= 12 { solvePair(j, i); break }
+                }
+                lines.append("\(i + 1): \(best)/12")
+            }
+            if calStep == .pair {
+                setWizard("HOLD THE BOARD WHERE A NEW CAMERA AND A POSITIONED ONE (\(positioned.sorted().map { String($0 + 1) }.joined(separator: ","))) SEE IT TOGETHER, KEEP IT STILL, MOVE IT. CAMERA " + lines.joined(separator: "   ") + "  (BOARD \(a3 ? "A3" : "A4"))")
+            }
         default: break
         }
     }
 
-    func solveIntrinsics(_ i: Int) {
-        let s = slots[i], views = calViews
+    func solveIntrinsics(_ k: Int) {
+        let s = slots[k], views = s.calViews
         let w = Int(s.size.width), h = Int(s.size.height)
-        calStep = .idle
-        setWizard("CALCULATING THE LENS OF CAMERA \(i + 1)...")
+        s.solving = true
         DispatchQueue.global(qos: .userInitiated).async {
             let res = calibrateCamera(views: views, board: BoardSpec.points(a3: false), width: w, height: h)
             DispatchQueue.main.async {
+                s.solving = false
                 if let r = res, r.rms < 1.5 {
                     s.intr = r.K
                     let info = StoredIntrinsics(uid: s.uid, name: s.stage.cameraName, K: r.K, rms: r.rms, views: views.count, date: CalibStore.now())
                     s.intrInfo = info; CalibStore.save(info)
-                    s.stage.toast(String(format: "CAMERA %d CALIBRATED: ERROR %.2f PX%@", i + 1, r.rms, r.rms > 1 ? " (OVER 1 PX: REPEAT FOR BEST RESULT)" : ""))
-                    self.advanceCalibration()
+                    s.stage.toast(String(format: "CAMERA %d LENS DONE: ERROR %.2f PX%@", k + 1, r.rms, r.rms > 1 ? " (OVER 1 PX: REPEAT FOR BEST RESULT)" : ""))
+                    if self.calStep == .intrinsics, self.activeIdx.allSatisfy({ self.slots[$0].intr != nil }) { self.startPairs() }
                 } else {
+                    s.calViews = []; s.lastCap = nil
                     s.stage.toast(res == nil ? "THE LENS CALCULATION FAILED, TRYING AGAIN" : String(format: "ERROR %.1f PX IS TOO HIGH, TRYING AGAIN", res!.rms))
-                    self.startIntrinsics(i)
                 }
             }
         }
     }
 
-    func solvePair(_ i: Int) {
-        let pairs = calPairs, a = slots[0], s = slots[i]
-        guard let KA = a.intr, let KB = s.intr else { return }
-        let big = a3
-        calStep = .idle
-        setWizard("CALCULATING THE POSITION OF CAMERA \(i + 1)...")
+    /// Pose of camera i from pairs with the positioned camera j, chained into camera 1's frame.
+    func solvePair(_ j: Int, _ i: Int) {
+        let key = "\(j)-\(i)"
+        guard let pairs = pairData[key], let KA = slots[j].intr, let KB = slots[i].intr else { return }
+        let a = slots[0], s = slots[i], big = a3
+        s.solving = true
         DispatchQueue.global(qos: .userInitiated).async {
             let e = calibrateStereo(pairs: pairs, board: BoardSpec.points(a3: big), A: KA, B: KB)
             DispatchQueue.main.async {
-                if let e = e, e.rms < 1.5 {
-                    let st = StoredExtrinsics(uidA: a.uid, uid: s.uid, E: e, spacingMm: BoardSpec.spacingMm(a3: big), date: CalibStore.now())
-                    s.extr = st; CalibStore.save(st)
-                    s.stage.toast(String(format: "CAMERA %d POSITIONED: ERROR %.2f PX, %.2f M APART%@", i + 1, e.rms, length(e.T), e.rms > 1 ? " (OVER 1 PX)" : ""))
-                    self.advanceCalibration()
-                } else {
+                s.solving = false
+                guard let e = e, e.rms < 1.5 else {
+                    self.pairData[key] = []; self.pairLast[key] = nil
                     s.stage.toast("THE POSITION DID NOT FIT (CHECK THE BOARD SIZE A4 OR A3): TRYING AGAIN")
-                    self.startPair(i)
+                    return
                 }
+                var total = e
+                if j != 0, let ej = self.slots[j].extr?.E {
+                    let R = e.R * ej.R, t = e.R * ej.T + e.T
+                    let r = rodriguesInv(R)
+                    total = Extrinsics(r: [r.x, r.y, r.z], t: [t.x, t.y, t.z], rms: e.rms, pairs: e.pairs)
+                }
+                let st = StoredExtrinsics(uidA: a.uid, uid: s.uid, E: total, spacingMm: BoardSpec.spacingMm(a3: big), date: CalibStore.now())
+                s.extr = st; CalibStore.save(st)
+                self.positioned.insert(i)
+                s.stage.toast(String(format: "CAMERA %d POSITIONED (VIA CAMERA %d): ERROR %.2f PX, %.2f M FROM CAMERA 1%@", i + 1, j + 1, e.rms, length(total.T), e.rms > 1 ? " (OVER 1 PX)" : ""))
+                if self.activeIdx.allSatisfy({ self.positioned.contains($0) }) { self.finishCalibration() }
             }
         }
     }
@@ -302,7 +379,7 @@ extension MainView {
     // MARK: sync
 
     @objc func measureDelay() {
-        guard slots.count > 1 else { stage.toast("CHOOSE 2 OR 3 CAMERAS FIRST"); return }
+        guard slots.count > 1 else { stage.toast("CHOOSE 2 TO 4 CAMERAS FIRST"); return }
         for s in slots { s.sig = [] }
         measureStart = 0
         calStep = .measure
@@ -327,7 +404,7 @@ extension MainView {
         calStep = .idle
         let a = signal(slots[0])
         var report: [String] = []
-        for (i, s) in slots.enumerated() where i > 0 {
+        for (i, s) in slots.enumerated() where i > 0 && s.use {
             if let r = estimateOffset(a: a, b: signal(s)), r.peak > 0.05, abs(r.offset) < 1 {
                 s.offset = r.offset
                 defaults.set(r.offset, forKey: "offset." + CalibStore.safe(slots[0].uid) + "." + CalibStore.safe(s.uid))
@@ -344,7 +421,7 @@ extension MainView {
     func camerasHeader() -> [[String: Any]] {
         var out: [[String: Any]] = []
         for (i, s) in slots.enumerated() {
-            var c: [String: Any] = ["name": s.stage.cameraName, "uid": s.uid, "width": Int(s.size.width), "height": Int(s.size.height),
+            var c: [String: Any] = ["name": s.stage.cameraName, "uid": s.uid, "used": i == 0 || s.use, "width": Int(s.size.width), "height": Int(s.size.height),
                                     "offsetMs": r4(s.offset * 1000)]
             if let k = s.intr { c["fx"] = r4(k.fx); c["fy"] = r4(k.fy); c["cx"] = r4(k.cx); c["cy"] = r4(k.cy); c["k"] = k.k; c["model"] = "fisheye-kb4" }
             if i == 0 { c["R"] = [1, 0, 0, 0, 1, 0, 0, 0, 1]; c["t"] = [0, 0, 0] }
@@ -365,13 +442,17 @@ extension MainView {
         for (i, s) in slots.enumerated() {
             var l = "  \(i + 1) \(s.stage.cameraName) \(s.formatText)"
             if let k = s.intrInfo { l += String(format: "  lens %.2f px", k.rms) }
+            if !(i == 0 || s.use) { l += "  (not used)" }
             if i > 0 {
                 if let e = s.extr?.E { l += String(format: "  position %.2f px, %.2f m", e.rms, length(e.T)) }
                 l += String(format: "  delay %+.0f ms", s.offset * 1000)
             }
             lines.append(l)
         }
-        if let t = lastTri { lines.append(String(format: "  TRACKING %d: %d joints, %.1f px", t.quality, t.joints.count, t.meanErrPx)) }
+        if let t = lastTri {
+            lines.append(String(format: "  TRACKING %d: %d joints from %d views, %.1f px", t.quality, t.joints.count, t.views, t.meanErrPx))
+            lines.append("  PER CAMERA: " + t.viewQuality.keys.sorted().map { "\($0 + 1)=\(t.viewQuality[$0]!)" }.joined(separator: " "))
+        }
         return lines.joined(separator: "\n")
     }
 }

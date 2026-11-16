@@ -59,6 +59,7 @@ struct TriResult {
     var quality: Int
     var meanErrPx: Double
     var views: Int
+    var viewQuality: [Int: Int] = [:]      // per camera (slot index): 0...100
 
     /// Root-relative, y up, x = the subject's left when he faces the camera, z toward the camera, under the 3D joint names.
     func p3() -> [String: [Double]]? {
