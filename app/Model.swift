@@ -95,7 +95,7 @@ enum Level: Int, CaseIterable {
 
 enum Zone: Int { case green = 0, yellow, red }
 
-func zone(_ d: Double, _ l: Level) -> Zone { d <= l.green ? .green : (d <= l.yellow ? .yellow : .red) }
+func zoneOf(_ d: Double, _ l: Level) -> Zone { d <= l.green ? .green : (d <= l.yellow ? .yellow : .red) }
 
 struct Comparison {
     var diffs: [Limb: Double]

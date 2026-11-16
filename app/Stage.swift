@@ -147,7 +147,7 @@ final class StageView: NSView {
 
     private func drawPerson(_ p: Pose, _ aspect: CGFloat, _ rect: CGRect, _ ctx: CGContext, isPrimary: Bool) {
         var limbZone: [Limb: Zone] = [:]
-        if isPrimary, let c = comparison { for (l, d) in c.diffs { limbZone[l] = zone(d, level) } }
+        if isPrimary, let c = comparison { for (l, d) in c.diffs { limbZone[l] = zoneOf(d, level) } }
         func col(_ z: Zone?) -> NSColor { z.map { StageView.color($0) } ?? StageView.plain }
         ctx.setLineCap(.round); ctx.setLineWidth(4)
         var jointZone: [Jt: Zone] = [:]
@@ -201,7 +201,7 @@ final class StageView: NSView {
         let c = CGPoint(x: area.maxX - 78, y: area.maxY - 96)
         var col = NSColor.gray, label = "NO PERSON", scoreText = "--"
         if let cmp = comparison {
-            let z = zone(cmp.worst, level)
+            let z = zoneOf(cmp.worst, level)
             col = StageView.color(z)
             scoreText = "\(cmp.score)"
             label = z == .green ? (matched ? "MATCHED" : "ALIGNED") : (z == .yellow ? "CLOSE" : "FAR")
