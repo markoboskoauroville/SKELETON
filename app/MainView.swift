@@ -144,12 +144,12 @@ final class MainView: NSView, NSMenuDelegate {
         let r1 = row([cameraPopup, mirrorSw, anglesSw, onlySw, soundSw, voiceSw])
 
         sessionButton.isBordered = false; sessionButton.target = self; sessionButton.action = #selector(toggleSession)
-        setTitle(sessionButton, "③ START SESSION")
+        setTitle(sessionButton, "3  START SESSION")
         skipButton.isBordered = false; skipButton.target = self; skipButton.action = #selector(skip)
         setTitle(skipButton, "NEXT POSE"); skipButton.isHidden = true
         recordButton.isBordered = false; recordButton.target = self; recordButton.action = #selector(toggleRecord)
         setRecordTitle("RECORD")
-        let r2 = row([button("① LOAD POSE PHOTO", #selector(chooseFile)), button("② FREEZE MY POSE", #selector(freeze)), sessionButton, skipButton, recordButton])
+        let r2 = row([button("1  LOAD POSE PHOTO", #selector(chooseFile)), button("2  FREEZE MY POSE", #selector(freeze)), sessionButton, skipButton, recordButton])
 
         savedPopup.target = self; savedPopup.action = #selector(savedChosen)
         savedPopup.widthAnchor.constraint(equalToConstant: 210).isActive = true
@@ -465,7 +465,7 @@ final class MainView: NSView, NSMenuDelegate {
         let all = builtin + saved
         guard !all.isEmpty else { stage.toast("NO POSES FOUND"); return }
         session = all; sessionIndex = 0
-        setTitle(sessionButton, "③ STOP SESSION"); skipButton.isHidden = false
+        setTitle(sessionButton, "3  STOP SESSION"); skipButton.isHidden = false
         beginPose()
     }
 
@@ -473,7 +473,7 @@ final class MainView: NSView, NSMenuDelegate {
         guard session != nil else { return }
         session = nil
         stage.band = nil
-        setTitle(sessionButton, "③ START SESSION"); skipButton.isHidden = true
+        setTitle(sessionButton, "3  START SESSION"); skipButton.isHidden = true
         Voice.shared.stop()
         if say { stage.toast("SESSION STOPPED") }
         stage.needsDisplay = true
